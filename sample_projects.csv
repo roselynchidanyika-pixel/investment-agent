@@ -1,0 +1,4 @@
+project,name,currency,description,initial_investment,annual_revenues,operating_costs,tax_rate,discount_rate,financing_rate,reinvestment_rate,project_life,working_capital,terminal_value,revenue_growth_rate,cost_growth_rate,terminal_growth_rate
+A,Wind Farm,USD,Utility-scale onshore wind farm in USD territory,2000000,420000,80000,25,10,10,10,12,0,0,2.0,2.0,0
+B,Solar Array,ZAR,Commercial and industrial solar PV array in South Africa,36000000,8000000,1200000,27,8,8,10,10,0,6000000,1.5,1.5,0
+C,Mini Grid,ZWG,Rural mini-grid electrification programme in Zimbabwe,78000000,15000000,3000000,25,12,12,10,8,0,0,1.0,1.0,0
