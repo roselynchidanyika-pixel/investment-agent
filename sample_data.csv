@@ -1,4 +1,25 @@
-project_name,project_life,initial_investment,annual_revenues,operating_costs,tax_rate,discount_rate,working_capital,terminal_value,financing_rate,reinvestment_rate,growth_rate
-Solar Plant Expansion,12,2500000,700000,160000,25,9.5,80000,500000,9.5,9.5,3.0
-Logistics Fleet Renewal,8,1500000,390000,210000,22,11,40000,200000,11,11,0
-New Retail Outlet,10,800000,200000,150000,24,12,30000,0,12,12,2.5
+parameter,value
+project_name,Growth Facility Expansion
+project_description,Expansion of production capacity
+initial_investment,1000000
+project_life,10
+annual_revenue,350000
+operating_costs,80000
+tax_rate,0.25
+working_capital,0
+terminal_value,0
+wacc,0.10
+financing_rate,0.08
+reinvestment_rate,0.06
+revenue_growth,0.00
+cost_growth,0.00
+terminal_growth,0.00
+depreciation_rate,0.10
+currency,USD
+description,Expansion of production capacity to satisfy growing regional demand
+zig_revenue_share,0.20
+zig_cost_share,0.30
+zar_revenue_share,0.20
+zar_cost_share,0.10
+investment_fx_share,0.00
+liquidity_buffer_months,6

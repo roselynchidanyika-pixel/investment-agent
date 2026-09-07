@@ -1,417 +1,432 @@
-"""Risk analysis engine for the Integrated Investment Decision Agent for Capital Project Evaluation.
-
-Every risk assessment derives entirely from user-provided inputs and calculated
-financial indicators. No external market or entity data is fabricated.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Any
+from typing import Dict, List, Any
+import numpy as np
 
 
-@dataclass
-class RiskAssessment:
-    risk: str
-    severity: str
-    impact: str
-    explanation: str
-    mitigation: str
-    score: float
-    driver: str
-
-
-SEVERITY_LEVELS = {
-    "LOW": 1,
-    "MODERATE": 2,
-    "HIGH": 3,
-    "VERY HIGH": 4,
+IMPACT_TEXT = {
+    "LOW": "Limited",
+    "MODERATE": "Moderate",
+    "HIGH": "Significant",
+    "VERY HIGH": "Severe",
 }
 
 
-def assess_risks(results: dict[str, Any]) -> dict[str, Any]:
-    """Analyse financial risks based purely on model results and inputs."""
-    metrics = results["metrics"]
-    inputs = results["inputs"]
-    table = results["cash_flow_table"]
+def assess_risks(inputs: Dict[str, Any], metrics: Dict[str, Any],
+                fx_risk: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    risks = []
 
-    risks: list[RiskAssessment] = []
-    warnings = []
-    total_score = 0.0
-    max_score = 0.0
+    risks.append(assess_revenue_risk(inputs, metrics))
+    risks.append(assess_cost_risk(inputs, metrics))
+    risks.append(assess_wacc_risk(inputs, metrics))
+    risks.append(assess_value_creation_risk(inputs, metrics))
+    risks.append(assess_recovery_risk(inputs, metrics))
+    risks.append(assess_cashflow_timing_risk(inputs, metrics))
+    risks.append(assess_inflation_risk(inputs, metrics))
+    risks.append(assess_liquidity_risk(inputs, metrics))
+    risks.append(assess_profitability_risk(inputs, metrics))
 
-    npv = metrics["npv"]
-    irr = metrics["irr"]
-    discount = inputs.discount_rate
-    revenues = inputs.annual_revenues
-    costs = inputs.operating_costs
-    life = metrics["project_life"]
-    payback = metrics["payback"]
-    pi = metrics["pi"]
-    roi = metrics["roi"]
-
-    # 1. Revenue risk
-    if revenues <= 0:
-        severity, impact = "VERY HIGH", "Extreme"
-        explanation = (
-            "Annual revenues are zero or negative. The project has no identified income stream, "
-            "so all expected value depends entirely on unmodelled upside, making the investment "
-            "fundamentally unsupported."
-        )
-        mitigation = "Identify and quantify a realistic revenue base before committing capital."
-    elif revenues > 0 and costs / revenues >= 0.9:
-        severity, impact = "HIGH", "Significant"
-        explanation = (
-            f"Operating costs consume {costs/revenues*100:.0f}% of revenues, leaving a very thin "
-            "margin. Small downward moves in revenue or upward moves in costs could erase the "
-            "project's profitability."
-        )
-        mitigation = "Negotiate cost structures, add price escalation clauses, and stress-test margins."
-    elif revenues > 0 and costs / revenues >= 0.7:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            f"Operating costs consume roughly {costs/revenues*100:.0f}% of revenues. The project "
-            "retains a workable margin but is sensitive to revenue slippage."
-        )
-        mitigation = "Diversify revenue sources and build margin buffers into budgets."
+    weights = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+    if fx_risk is not None:
+        risks.append(assess_fx_risk(inputs, metrics, fx_risk))
+        weights.append(1)
     else:
-        severity, impact = "LOW", "Limited"
-        explanation = (
-            f"Operating costs consume {costs/revenues*100:.0f}% of revenues. Healthy gross margins "
-            "provide a buffer against moderate revenue deviations."
-        )
-        mitigation = "Maintain routine market monitoring to sustain the favourable margin position."
+        fx_risk = {}
 
-    risks.append(
-        RiskAssessment(
-            risk="Revenue Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="User-provided revenue and cost inputs",
-        )
+    overall_score = np.average(
+        [r["severity_score"] for r in risks],
+        weights=weights,
     )
 
-    # 2. Operating-cost risk
-    if costs <= 0:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            "Operating costs are zero or not provided, which understates the cost burden and risks "
-            "over-stating project returns."
-        )
-        mitigation = "Provide complete, audited operating cost estimates."
-    elif costs / revenues >= 0.9 and revenues > 0:
-        severity, impact = "HIGH", "Significant"
-        explanation = (
-            "Costs are near or above revenue. Any cost inflation above assumptions directly "
-            "threatens cash-flow generation."
-        )
-        mitigation = "Secure fixed-price supply contracts and implement cost-containment controls."
+    if overall_score <= 3:
+        overall_level = "LOW"
+    elif overall_score <= 5:
+        overall_level = "MODERATE"
+    elif overall_score <= 7:
+        overall_level = "HIGH"
     else:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            "Operating costs are significant relative to project scale. Cost escalation beyond the "
-            "growth assumptions will compress margins and reduce cash flows."
-        )
-        mitigation = "Benchmark cost assumptions, hedge input-price exposure where possible."
-
-    risks.append(
-        RiskAssessment(
-            risk="Operating-Cost Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="User-provided operating cost inputs",
-        )
-    )
-
-    # 3. WACC / interest-rate risk
-    if irr is not None and discount > 0:
-        spread = irr - discount
-        if spread < 0:
-            severity, impact = "HIGH", "Significant"
-            explanation = (
-                f"The project IRR ({irr:.2f}%) is below the discount rate ({discount:.2f}%). "
-                "The project already fails to earn its cost of capital, and any rise in "
-                "interest rates or required return worsens value destruction."
-            )
-            mitigation = "Reconsider the financing structure or demand a lower hurdle rate; refinance debt."
-        elif spread < 2:
-            severity, impact = "MODERATE", "Moderate"
-            explanation = (
-                f"The project IRR ({irr:.2f}%) barely exceeds the discount rate ({discount:.2f}%). "
-                "The margin over the cost of capital is thin, leaving limited protection against "
-                "rising interest rates."
-            )
-            mitigation = "Lock in fixed-rate financing and re-test the decision under higher WACC."
-        else:
-            severity, impact = "LOW", "Limited"
-            explanation = (
-                f"The project IRR ({irr:.2f}%) provides a cushion of {spread:.2f} percentage points "
-                "over the discount rate ({discount:.2f}%). The project can absorb meaningful rises "
-                "in the cost of capital."
-            )
-            mitigation = "Continue to monitor the rate environment but risk is contained."
-
-    risks.append(
-        RiskAssessment(
-            risk="WACC / Interest-Rate Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="Calculated IRR vs user-specified discount rate",
-        )
-    )
-
-    # 4. NPV breakeven / value-creation risk
-    if npv < 0:
-        severity, impact = "VERY HIGH", "Extreme"
-        explanation = (
-            f"NPV of ${npv:,.0f} is negative. The project is expected to destroy value and every "
-            "additional percentage point of uncertainty compounds the expected loss."
-        )
-        mitigation = "Do not proceed unless structure, costs or revenues change materially."
-    elif npv > 0 and npv / max(inputs.initial_investment, 1) < 0.10:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            f"NPV of ${npv:,.0f} is only {npv/max(inputs.initial_investment, 1)*100:.1f}% of the "
-            "initial investment. Value creation is marginal and could be erased by small "
-            "assumption shifts."
-        )
-        mitigation = "Search for upside catalysts or cost savings to widen the value margin."
-    else:
-        severity, impact = "LOW", "Limited"
-        explanation = (
-            f"NPV of ${npv:,.0f} exceeds 10% of the initial investment, providing a robust buffer "
-            "against reasonably foreseeable deviations from the base case."
-        )
-        mitigation = "Standard monitoring and variance reporting."
-
-    risks.append(
-        RiskAssessment(
-            risk="Value-Creation (Breakeven) Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="Calculated NPV relative to initial investment",
-        )
-    )
-
-    # 5. Investment recovery / payback risk
-    if payback is None or payback > life:
-        severity, impact = "HIGH", "Significant"
-        explanation = (
-            f"Payback ({payback if payback else 'N/A'}) exceeds the project life of {life} years. "
-            "Capital is tied up for the project's entire operating window without full recovery, "
-            "heightening liquidity and opportunity-cost exposure."
-        )
-        mitigation = "Shorten the recovery profile with earlier cash inflows or exit clauses."
-    elif payback > life * 0.75:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            f"Payback of {payback:.1f} years consumes over 75% of the {life}-year project life, "
-            "meaning most of the value is earned late and is more exposed to forecast error."
-        )
-        mitigation = "Consider accelerating cash collection or staging investment tranches."
-    else:
-        severity, impact = "LOW", "Limited"
-        explanation = (
-            f"Payback of {payback:.1f} years is well within the {life}-year project life, "
-            "providing early capital recovery and reducing liquidity exposure."
-        )
-        mitigation = "Maintain current cash-collection discipline."
-
-    risks.append(
-        RiskAssessment(
-            risk="Investment-Recovery (Payback) Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="Calculated payback vs project life",
-        )
-    )
-
-    # 6. Cash-flow timing risk
-    first_year = table.iloc[0]["Net Cash Flow"] if len(table) > 0 else 0
-    if len(table) > 0 and first_year <= 0:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            "The project generates little or no cash flow in the first year. Early-year reliance "
-            "on the base case means small timing slippages delay recovery and reduce NPV."
-        )
-        mitigation = "Stage the project, phase capital outlays, and negotiate flexible vendor terms."
-    else:
-        severity, impact = "LOW", "Limited"
-        explanation = (
-            "The project begins generating net cash flow immediately, reducing cash-flow timing "
-            "risk relative to the base case."
-        )
-        mitigation = "Sustain early-phase execution discipline."
-
-    risks.append(
-        RiskAssessment(
-            risk="Cash-Flow Timing Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="Shape of the calculated net cash-flow stream",
-        )
-    )
-
-    # 7. Inflation risk
-    if inputs.revenue_growth_rate > 0 or inputs.cost_growth_rate > 0:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            f"The model applies growth rates to revenue ({inputs.revenue_growth_rate:.1f}%/yr) and "
-            f"costs ({inputs.cost_growth_rate:.1f}%/yr). The real (inflation-adjusted) cash-flow "
-            "outcome depends on whether prices and costs move as assumed; divergences directly "
-            "shift NPV."
-        )
-        mitigation = "Build inflation-indexed contracts and re-run the model under inflation-adjusted scenarios."
-    else:
-        severity, impact = "LOW", "Limited"
-        explanation = (
-            "No explicit growth assumptions were entered. Cash flows are modelled in nominal "
-            "terms with no inflation adjustment, so inflation risk is largely unmeasured and "
-            "potentially understated."
-        )
-        mitigation = "Add explicit revenue and cost growth assumptions to model inflation explicitly."
-
-    risks.append(
-        RiskAssessment(
-            risk="Inflation Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="User-specified growth assumptions and currency assumptions",
-        )
-    )
-
-    # 8. Liquidity risk
-    if pi is not None and pi < 1:
-        severity, impact = "HIGH", "Significant"
-        explanation = (
-            f"Profitability index of {pi:.3f} is below 1.0. The present value of inflows does not "
-            "cover the outlay, meaning capital committed is not expected to be fully returned in "
-            "present-value terms, restricting liquidity recovery."
-        )
-        mitigation = "Require higher return thresholds or shorter exposure horizons."
-    elif payback is not None:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            f"Capital is recovered over {payback:.1f} years based on the payback profile, tying up "
-            "liquidity until recovery completes. Liquidity stays restricted during this window."
-        )
-        mitigation = "Monitor debt-covenant headroom and maintain contingency credit lines."
-    else:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = "Capital recovery is indeterminate; liquidity is treated as continuously at risk."
-        mitigation = "Set explicit recovery milestones before commitment."
-
-    risks.append(
-        RiskAssessment(
-            risk="Liquidity Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="Calculated PI and payback profile",
-        )
-    )
-
-    # 9. Profitability-sustainability risk
-    if roi is not None and roi < 0:
-        severity, impact = "HIGH", "Significant"
-        explanation = (
-            f"ROI of {roi:.1f}% is negative: total returns never exceed the committed capital over "
-            f"the {life}-year horizon, so the project structurally loses money."
-        )
-        mitigation = "Re-scope or abandon the project; adjust pricing, volumes or costs materially."
-    elif roi is not None and roi < 20:
-        severity, impact = "MODERATE", "Moderate"
-        explanation = (
-            f"ROI of {roi:.1f}% is modest. The project creates some total return but limited "
-            "headroom against downside deviations."
-        )
-        mitigation = "Pursue efficiency gains and revenue synergies to lift returns."
-    else:
-        severity, impact = "LOW", "Limited"
-        explanation = (
-            f"ROI of {roi:.1f}% provides a strong total return relative to the initial investment."
-        )
-        mitigation = "Retain the current approach while tracking actual vs budgeted performance."
-
-    risks.append(
-        RiskAssessment(
-            risk="Profitability-Sustainability Risk",
-            severity=severity,
-            impact=impact,
-            explanation=explanation,
-            mitigation=mitigation,
-            score=SEVERITY_LEVELS[severity],
-            driver="Calculated ROI",
-        )
-    )
-
-    # Composite risk levels per supplied inputs
-    total_score = sum(r.score for r in risks)
-    max_score = sum(max(SEVERITY_LEVELS.values()) for _ in risks)
-
-    weighted = total_score / (max_score or 1)
-    if weighted >= 0.75:
-        overall = "VERY HIGH"
-    elif weighted >= 0.55:
-        overall = "HIGH"
-    elif weighted >= 0.35:
-        overall = "MODERATE"
-    else:
-        overall = "LOW"
-
-    if weighted >= 0.75:
-        overall_explanation = (
-            "The composite risk assessment is very high. Multiple indicators point to expected "
-            "value destruction or fragile returns; the project should not proceed without "
-            "fundamental restructuring of assumptions."
-        )
-    elif weighted >= 0.55:
-        overall_explanation = (
-            "The composite risk assessment is high. Several metrics operate near unfavourable "
-            "thresholds and the project is vulnerable to realistic assumption changes. "
-            "Obtain additional assurance before approving capital."
-        )
-    elif weighted >= 0.35:
-        overall_explanation = (
-            "The composite risk assessment is moderate. The project shows acceptable but not "
-            "overwhelming financial merit, with standard operational risks best managed through "
-            "monitoring and contingency planning."
-        )
-    else:
-        overall_explanation = (
-            "The composite risk assessment is low. Most indicators sit comfortably in favourable "
-            "territory and the project can absorb a reasonable level of deviation from the "
-            "base case."
-        )
+        overall_level = "VERY HIGH"
 
     return {
         "risks": risks,
-        "overall_risk": overall,
-        "overall_risk_level": SEVERITY_LEVELS[overall],
-        "overall_score": weighted,
-        "overall_explanation": overall_explanation,
-        "warnings": warnings,
+        "overall_score": overall_score,
+        "overall_level": overall_level,
+        "fx_risk": fx_risk,
     }
+
+
+def _make_risk(name: str, impact: str, severity: str, score: int,
+               explanation: str, mitigation: str) -> Dict[str, Any]:
+    if impact not in IMPACT_TEXT:
+        impact = "MODERATE"
+    return {
+        "name": name,
+        "impact": impact,
+        "impact_text": IMPACT_TEXT[impact],
+        "severity": severity,
+        "severity_score": score,
+        "explanation": explanation,
+        "mitigation": mitigation,
+    }
+
+
+def assess_revenue_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    revenue = float(inputs.get("annual_revenue", 0))
+    costs = float(inputs.get("operating_costs", 0))
+
+    if revenue > 0:
+        margin = (revenue - costs) / revenue
+    else:
+        margin = -1
+
+    if margin < 0.10:
+        severity, score, impact = "HIGH", 8, "HIGH"
+        explanation = (
+            f"Operating costs consume {costs/revenue:.0%} of revenues. The gross margin is only {margin:.1%}, "
+            f"leaving minimal buffer against revenue shortfalls. A modest decline in volume or price could "
+            f"push the project into operating losses."
+        )
+        mitigation = (
+            "Diversify revenue streams, secure long-term contracts, build revenue reserves, "
+            "and implement flexible pricing strategies."
+        )
+    elif margin < 0.25:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"Operating costs consume {costs/revenue:.0%} of revenues. Moderate margins provide some buffer, "
+            f"but meaningful revenue deviations could still erode profitability."
+        )
+        mitigation = (
+            "Monitor market conditions regularly, maintain cost flexibility, "
+            "and develop contingency plans for revenue shortfalls."
+        )
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"Operating costs consume just {costs/revenue:.0%} of revenues. Healthy gross margins "
+            f"provide a buffer against moderate revenue deviations."
+        )
+        mitigation = "Maintain routine market monitoring to sustain the favourable margin position."
+
+    return _make_risk("Revenue Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_cost_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    revenue = float(inputs.get("annual_revenue", 0))
+    costs = float(inputs.get("operating_costs", 0))
+    investment = float(inputs.get("initial_investment", 0))
+
+    if investment > 0:
+        cost_intensity = costs / investment
+    else:
+        cost_intensity = 0.5
+
+    if revenue > 0 and costs > revenue * 0.75:
+        severity, score, impact = "HIGH", 7, "HIGH"
+        explanation = (
+            f"Operating costs are {costs/revenue:.0%} of revenue, leaving a thin margin. Cost escalation "
+            f"beyond assumptions will rapidly compress profitability."
+        )
+        mitigation = "Negotiate fixed-price contracts, implement strict cost controls, and build cost contingency."
+    elif revenue > 0 and costs > revenue * 0.5:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"Operating costs are {costs/revenue:.0%} of revenue. Cost escalation is a relevant "
+            f"but manageable risk given the current margins."
+        )
+        mitigation = "Benchmark cost assumptions and hedge input-price exposure where possible."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"Operating costs are {costs/revenue:.0%} of revenue. Costs are well contained relative to the "
+            f"revenue base, providing good headroom against escalation."
+        )
+        mitigation = "Maintain routine cost tracking and monitoring."
+
+    return _make_risk("Operating-Cost Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_wacc_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    wacc = float(inputs.get("wacc", 0.1))
+    irr = metrics.get("irr", 0)
+    spread = irr - wacc
+
+    if spread < 0:
+        severity, score, impact = "HIGH", 8, "HIGH"
+        explanation = (
+            f"The project IRR ({irr:.1%}) is below the discount rate ({wacc:.1%}). The project does not "
+            f"generate returns above its cost of capital, and any rise in rates worsens the position."
+        )
+        mitigation = "Consider restructuring capital, refinancing, or renegotiating the discount rate."
+    elif spread < 0.02:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"The project IRR ({irr:.1%}) provides a cushion of only {spread:.1%} over the discount rate "
+            f"({wacc:.1%}). Modest rises in the cost of capital could strip the project of its return advantage."
+        )
+        mitigation = "Lock in financing rates and evaluate rate-sensitive performance risks."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"The project IRR ({irr:.1%}) provides a cushion of {spread:.1%} over the discount rate "
+            f"({wacc:.1%}). The project can absorb meaningful rises in the cost of capital."
+        )
+        mitigation = "Continue to monitor the rate environment but risk is contained."
+
+    return _make_risk("WACC / Interest-Rate Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_value_creation_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    npv = metrics.get("npv", 0)
+    initial_investment = float(inputs.get("initial_investment", 0))
+
+    if initial_investment == 0:
+        return _make_risk("Value-Creation (Breakeven) Risk", "MODERATE", "MODERATE", 5,
+                          "Cannot assess value-creation breakeven without an initial investment.",
+                          "Provide investment data.")
+
+    ratio = npv / initial_investment
+
+    if npv < 0:
+        severity, score, impact = "VERY HIGH", 9, "VERY HIGH"
+        explanation = (
+            f"NPV of ${npv:,.0f} is negative. The project does not recover its cost of capital, "
+            f"and even the base case destroys value."
+        )
+        mitigation = "Refrain from investing until assumptions are materially improved."
+    elif ratio < 0.10:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"NPV of ${npv:,.0f} is only {ratio:.1%} of the initial investment of ${initial_investment:,.0f}. "
+            f"The margin above breakeven is thin; plausible deviations could reverse the outcome."
+        )
+        mitigation = "Stress-test revenue and cost assumptions and monitor variance closely."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"NPV of ${npv:,.0f} exceeds 10% of the initial investment (${ratio:.1%}), providing a robust "
+            f"buffer against reasonably foreseeable deviations from the base case."
+        )
+        mitigation = "Standard monitoring and variance reporting."
+
+    return _make_risk("Value-Creation (Breakeven) Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_recovery_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    payback = metrics.get("payback", float("inf"))
+    project_life = float(inputs.get("project_life", 10))
+
+    if payback == float("inf") or payback > project_life:
+        severity, score, impact = "VERY HIGH", 9, "VERY HIGH"
+        explanation = (
+            f"Payback of {payback:.1f} years exceeds the {int(project_life)}-year project life. "
+            f"The initial investment is never recovered within the operating window."
+        )
+        mitigation = "Reconsider investment size or extend project life if feasible."
+    elif payback > project_life * 0.7:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"Payback of {payback:.1f} years is late in the {int(project_life)}-year project life, "
+            f"leaving limited time to recoup capital and generate surplus."
+        )
+        mitigation = "Accelerate revenue collection and tighten cost control."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"Payback of {payback:.1f} years is well within the {int(project_life)}-year project life, "
+            f"providing early capital recovery and reducing liquidity exposure."
+        )
+        mitigation = "Maintain current cash-collection discipline."
+
+    return _make_risk("Investment-Recovery (Payback) Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_cashflow_timing_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    cash_flows = metrics.get("cash_flows", [])
+    if len(cash_flows) < 2:
+        return _make_risk("Cash-Flow Timing Risk", "MODERATE", "MODERATE", 5,
+                          "Insufficient data to assess cash-flow timing.",
+                          "Provide more data.")
+
+    first_years_negative = sum(1 for cf in cash_flows[1:3] if cf < 0) if len(cash_flows) >= 3 else 0
+
+    if first_years_negative >= 2:
+        severity, score, impact = "HIGH", 7, "HIGH"
+        explanation = (
+            "The project generates negative operating cash flows in the first two operating years. "
+            "This delays value creation and increases timing risk."
+        )
+        mitigation = "Structure financing to bridge early-period cash gaps."
+    elif first_years_negative == 1:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            "One of the first two years has negative cash flow. Timing risk is present but limited."
+        )
+        mitigation = "Monitor early cash flows and maintain liquidity buffers."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            "The project begins generating net cash flow immediately, reducing cash-flow timing risk "
+            "relative to the base case."
+        )
+        mitigation = "Sustain early-phase execution discipline."
+
+    return _make_risk("Cash-Flow Timing Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_inflation_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    revenue_growth = float(inputs.get("revenue_growth", inputs.get("growth_rate", 0)))
+    cost_growth = float(inputs.get("cost_growth", inputs.get("growth_rate", 0)))
+
+    if revenue_growth == 0 and cost_growth == 0:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            "No explicit growth assumptions were entered. Cash flows are modelled in nominal terms "
+            "with no inflation adjustment, so inflation risk is largely unmeasured and potentially understated."
+        )
+        mitigation = "Add explicit revenue and cost growth assumptions to model inflation explicitly."
+    elif cost_growth > revenue_growth:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"Cost growth ({cost_growth:.1%}) exceeds revenue growth ({revenue_growth:.1%}). "
+            f"Margins compress over time, exposing the project to inflation-driven cost pressure."
+        )
+        mitigation = "Re-align cost and revenue escalators."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"Revenue growth ({revenue_growth:.1%}) meets or exceeds cost growth ({cost_growth:.1%}), "
+            f"suggesting margins are preserved in real terms against inflation."
+        )
+        mitigation = "Keep inflation assumptions under periodic review."
+
+    return _make_risk("Inflation Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_liquidity_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    payback = metrics.get("payback", float("inf"))
+    project_life = float(inputs.get("project_life", 10))
+
+    if payback == float("inf"):
+        severity, score, impact = "VERY HIGH", 9, "VERY HIGH"
+        explanation = "Capital is never recovered, leaving liquidity permanently committed at risk."
+        mitigation = "Reconsider the investment entirely."
+    elif payback > project_life * 0.6:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"Capital is recovered over {payback:.1f} years based on the payback profile, tying up "
+            f"liquidity until recovery completes. Liquidity stays restricted during this window."
+        )
+        mitigation = "Monitor debt-covenant headroom and maintain contingency credit lines."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"Payback of {payback:.1f} years releases liquidity relatively early in the "
+            f"{int(project_life)}-year life, limiting the period capital is tied up."
+        )
+        mitigation = "Maintain standard liquidity reserves."
+
+    return _make_risk("Liquidity Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_profitability_risk(inputs: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    roi = metrics.get("roi", 0)
+
+    if roi < 0:
+        severity, score, impact = "VERY HIGH", 9, "VERY HIGH"
+        explanation = (
+            f"ROI of {roi:.1%} is negative. The project generates a total return below its committed capital, "
+            f"indicating a loss over the project life."
+        )
+        mitigation = "Do not proceed without substantial restructuring."
+    elif roi < 0.10:
+        severity, score, impact = "MODERATE", 5, "MODERATE"
+        explanation = (
+            f"ROI of {roi:.1%} is modest for the capital deployed. Returns may not adequately compensate "
+            f"for risk over the project's long horizon."
+        )
+        mitigation = "Re-evaluate return expectations vs. opportunity cost of capital."
+    else:
+        severity, score, impact = "LOW", 2, "LOW"
+        explanation = (
+            f"ROI of {roi:.1%} provides a strong total return relative to the initial investment."
+        )
+        mitigation = "Retain the current approach while tracking actual vs budgeted performance."
+
+    return _make_risk("Profitability-Sustainability Risk", impact, severity, score, explanation, mitigation)
+
+
+def assess_fx_risk(inputs: Dict[str, Any], metrics: Dict[str, Any],
+                   fx_risk: Dict[str, Any]) -> Dict[str, Any]:
+    level = (fx_risk.get("level") or "MODERATE").upper()
+    score_in = float(fx_risk.get("score") or 5.0)
+    exposure = fx_risk.get("exposure", {}) or {}
+
+    exp_level = (exposure.get("level") or "MODERATE").upper()
+    swing = abs(float(fx_risk.get("swing_pct") or 0.0))
+
+    base = 0.0
+    if level == "LOW":
+        base = 2.0
+    elif level == "MODERATE":
+        base = 4.0
+    else:
+        base = 7.0
+
+    if exp_level == "HIGH":
+        base += 2.0
+    elif exp_level == "MODERATE":
+        base += 1.0
+
+    if swing >= 15:
+        base += 2.0
+    elif swing >= 7:
+        base += 1.0
+
+    score = int(round(min(10.0, max(1.0, base))))
+
+    if score <= 3:
+        severity, impact = "LOW", "LOW"
+    elif score <= 5:
+        severity, impact = "MODERATE", "MODERATE"
+    elif score <= 7:
+        severity, impact = "HIGH", "HIGH"
+    else:
+        severity, impact = "VERY HIGH", "VERY HIGH"
+
+    explanation = (
+        f"Market FX risk is {level} (score {score_in:.1f}/10) and the project's net currency exposure "
+        f"is {exp_level}. Across the ±5% exchange-rate scenarios NPV moves by up to {swing:.1f}%. "
+        f"Any material move in USD / ZiG / ZAR changes the project's cash flows, NPV, IRR and payback "
+        f"in the base currency. This risk is driven by live market volatility where a data feed is "
+        f"available; ZiG estimates carry additional uncertainty."
+    )
+    mitigation = (
+        "Match revenue and cost currencies (natural hedging), hold USD cash when foreign inflows are "
+        "large, convert to ZiG only for near-term local obligations, and re-run the FX scenario analysis "
+        "whenever rates move materially."
+    )
+
+    return _make_risk("Currency / FX Risk", impact, severity, score, explanation, mitigation)
+
+
+def get_risk_summary(risk_data: Dict[str, Any]) -> str:
+    overall = risk_data["overall_level"]
+    score = risk_data["overall_score"]
+
+    high_risks = [r for r in risk_data["risks"] if r["severity"] in ("HIGH", "VERY HIGH")]
+    med_risks = [r for r in risk_data["risks"] if r["severity"] == "MODERATE"]
+    low_risks = [r for r in risk_data["risks"] if r["severity"] == "LOW"]
+
+    lines = [
+        f"**Overall Risk Level: {overall}** (Score: {score:.1f}/10)",
+        f"- High risks: {len(high_risks)}",
+        f"- Moderate risks: {len(med_risks)}",
+        f"- Low risks: {len(low_risks)}",
+        "",
+    ]
+
+    if high_risks:
+        lines.append("**Key Concerns:**")
+        for r in high_risks:
+            lines.append(f"- {r['name']}: {r['explanation'][:100]}...")
+
+    return "\n".join(lines)

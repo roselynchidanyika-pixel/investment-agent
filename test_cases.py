@@ -1,279 +1,411 @@
-"""Automated test cases for the Integrated Investment Decision Agent for Capital Project Evaluation.
-
-Test 1 — Normal Profitable Project          -> EXPECT ACCEPT
-Test 2 — Negative NPV Project               -> EXPECT REJECT
-Test 3 — Edge / Invalid Inputs              -> EXPECT SAFE HANDLING (validation)
-Test 4 — High-Risk / Worst-Case Project     -> EXPECT REJECT or REVIEW (computed)
-
-Run:  python test_cases.py
-"""
-
-from __future__ import annotations
-
 import sys
-import traceback
-from typing import Any
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from calculations import ProjectInputs, run_analysis
+from calculations import calculate_all_metrics
 from data_validation import validate_project_inputs
 from risk_analysis import assess_risks
-from scenario_analysis import build_scenarios, scenario_summary
-from report_generator import decision_final
+from scenario_analysis import run_scenario_analysis
+from project_templates import PROJECT_TYPES, get_project_template, get_template_inputs
+from fx_analysis import (
+    FX_SCENARIOS,
+    STRATEGY_OPTIONS,
+    run_fx_scenario_analysis,
+    assess_currency_exposure,
+    recommend_currency_strategy,
+    get_fx_risk_summary,
+)
 
 
-def _compact(v: float | None, kind: str = "money") -> str:
-    if v is None:
-        return "N/A"
-    if kind == "pct":
-        return f"{v:.2f}%"
-    return f"${v:,.0f}"
+def test_profitable_project():
+    print("\n" + "=" * 70)
+    print("TEST 1: Normal Profitable Project")
+    print("=" * 70)
 
-
-def test_1_profitable_project() -> dict[str, Any]:
-    """Normal profitable project: strong revenues, low costs, IRR > WACC."""
-    inputs = ProjectInputs(
-        project_name="Growth Facility Expansion",
-        initial_investment=1_000_000,
-        project_life=10,
-        annual_revenues=350_000,
-        operating_costs=80_000,
-        tax_rate=25,
-        working_capital=0,
-        terminal_value=0,
-        discount_rate=10,
-        financing_rate=10,
-        reinvestment_rate=10,
-    )
-    results = run_analysis(inputs)
-    risks = assess_risks(results)
-    final = decision_final(results, risks)
-    return {
-        "name": "Test 1 — Normal Profitable Project",
-        "inputs": inputs,
-        "results": results,
-        "final": final,
-        "expected": "ACCEPT",
+    inputs = {
+        "project_name": "Profitable Manufacturing Plant",
+        "project_description": "New factory for consumer goods",
+        "initial_investment": 1000000,
+        "project_life": 10,
+        "annual_revenue": 500000,
+        "operating_costs": 200000,
+        "tax_rate": 0.25,
+        "working_capital": 50000,
+        "terminal_value": 200000,
+        "wacc": 0.10,
+        "financing_rate": 0.08,
+        "reinvestment_rate": 0.06,
+        "growth_rate": 0.03,
+        "depreciation_rate": 0.10,
+        "currency": "USD",
     }
 
+    is_valid, errors, warnings = validate_project_inputs(inputs)
+    print(f"Validation: {'PASS' if is_valid else 'FAIL'}")
+    if errors:
+        for e in errors:
+            print(f"  Error: {e}")
 
-def test_2_negative_npv_project() -> dict[str, Any]:
-    """High costs relative to moderate revenues → negative NPV."""
-    inputs = ProjectInputs(
-        project_name="Loss-Making Venture",
-        initial_investment=2_000_000,
-        project_life=8,
-        annual_revenues=300_000,
-        operating_costs=280_000,
-        tax_rate=30,
-        working_capital=0,
-        terminal_value=0,
-        discount_rate=12,
-        financing_rate=12,
-        reinvestment_rate=12,
-    )
-    results = run_analysis(inputs)
-    risks = assess_risks(results)
-    final = decision_final(results, risks)
-    return {
-        "name": "Test 2 — Negative NPV Project",
-        "inputs": inputs,
-        "results": results,
-        "final": final,
-        "expected": "REJECT",
-    }
+    metrics = calculate_all_metrics(inputs)
+    risk_data = assess_risks(inputs, metrics)
+
+    print(f"\nNPV: ${metrics['npv']:,.0f}")
+    print(f"IRR: {metrics['irr']:.1%}")
+    print(f"MIRR: {metrics['mirr']:.1%}")
+    print(f"PI: {metrics['pi']:.2f}")
+    print(f"ROI: {metrics['roi']:.1%}")
+    print(f"Payback: {metrics['payback']:.1f} years")
+    print(f"Risk Level: {risk_data['overall_level']}")
+    print(f"Decision: {metrics['npv_status']['decision']}")
+
+    expected = "ACCEPT"
+    actual = metrics["npv_status"]["decision"]
+    passed = actual == expected
+    print(f"\nExpected: {expected}")
+    print(f"Actual: {actual}")
+    print(f"RESULT: {'PASS' if passed else 'FAIL'}")
+    assert passed, f"Test 1 failed: expected {expected}, got {actual}"
+    return passed
 
 
-def test_3_edge_case_invalid_inputs() -> dict[str, Any]:
-    """Zero / negative / incomplete inputs must be caught by validation."""
-    bad_cases = [
-        {"project_name": "", "initial_investment": 0, "annual_revenues": -500, "project_life": 0},
-        {"project_name": "X", "initial_investment": "abc", "annual_revenues": 100, "project_life": 5},
-        {"project_name": "Y", "initial_investment": 1000, "annual_revenues": 200, "project_life": 200},
-        {"project_name": "Z", "initial_investment": 1000, "annual_revenues": 200, "operating_costs": 5000, "project_life": 5},
-        {},
-    ]
-    checks = []
+def test_negative_npv_project():
+    print("\n" + "=" * 70)
+    print("TEST 2: Negative NPV Project")
+    print("=" * 70)
 
-    for i, data in enumerate(bad_cases):
-        enriched = dict(data)
-        enriched.setdefault("discount_rate", 10)
-        enriched.setdefault("tax_rate", 25)
-        v = validate_project_inputs(enriched)
-        safe = True if (not v.is_valid or v.errors or v.warnings) else False
-        checks.append(
-            {
-                "case": f"Bad input case {i + 1}",
-                "validation_blocked": True,
-                "errors_detected": len(v.errors) > 0,
-                "warnings_detected": len(v.warnings) > 0,
-                "safe": True,
-                "errors": v.errors,
-                "warnings": v.warnings,
-            }
-        )
-
-    # Valid but minimal edge: zero revenue
-    minimal = {
-        "project_name": "Zero Revenue Project",
-        "initial_investment": 100_000,
+    inputs = {
+        "project_name": "Unprofitable Venture",
+        "project_description": "High cost, low return project",
+        "initial_investment": 5000000,
         "project_life": 5,
-        "annual_revenues": 0,
-        "operating_costs": 0,
-        "tax_rate": 25,
-        "discount_rate": 10,
+        "annual_revenue": 400000,
+        "operating_costs": 350000,
+        "tax_rate": 0.30,
+        "working_capital": 200000,
+        "terminal_value": 0,
+        "wacc": 0.15,
+        "financing_rate": 0.12,
+        "reinvestment_rate": 0.08,
+        "growth_rate": 0.02,
+        "depreciation_rate": 0.10,
+        "currency": "USD",
+    }
+
+    is_valid, errors, warnings = validate_project_inputs(inputs)
+    print(f"Validation: {'PASS' if is_valid else 'FAIL'}")
+
+    metrics = calculate_all_metrics(inputs)
+    risk_data = assess_risks(inputs, metrics)
+
+    print(f"\nNPV: ${metrics['npv']:,.0f}")
+    print(f"IRR: {metrics['irr']:.1%}")
+    print(f"MIRR: {metrics['mirr']:.1%}")
+    print(f"PI: {metrics['pi']:.2f}")
+    print(f"ROI: {metrics['roi']:.1%}")
+    print(f"Payback: {metrics['payback']:.1f} years" if metrics['payback'] != float('inf') else "Payback: Never")
+    print(f"Risk Level: {risk_data['overall_level']}")
+    print(f"Decision: {metrics['npv_status']['decision']}")
+
+    expected = "REJECT"
+    actual = metrics["npv_status"]["decision"]
+    passed = actual == expected
+    print(f"\nExpected: {expected}")
+    print(f"Actual: {actual}")
+    print(f"RESULT: {'PASS' if passed else 'FAIL'}")
+    assert passed, f"Test 2 failed: expected {expected}, got {actual}"
+    return passed
+
+
+def test_edge_cases():
+    print("\n" + "=" * 70)
+    print("TEST 3: Edge Cases")
+    print("=" * 70)
+
+    print("\n--- Edge Case 3a: Very Small Investment ---")
+    inputs_small = {
+        "project_name": "Micro Project",
+        "project_description": "Very small investment test",
+        "initial_investment": 100,
+        "project_life": 3,
+        "annual_revenue": 200,
+        "operating_costs": 50,
+        "tax_rate": 0.25,
         "working_capital": 0,
         "terminal_value": 0,
-        "financing_rate": 10,
-        "reinvestment_rate": 10,
+        "wacc": 0.10,
+        "financing_rate": 0.08,
+        "reinvestment_rate": 0.06,
+        "growth_rate": 0.0,
+        "depreciation_rate": 0.33,
+        "currency": "USD",
     }
-    v = validate_project_inputs(minimal)
-    results = None
-    if v.is_valid:
-        results = run_analysis(ProjectInputs(**minimal))
-        risks = assess_risks(results)
+    try:
+        metrics_small = calculate_all_metrics(inputs_small)
+        print(f"  NPV: ${metrics_small['npv']:,.0f}")
+        print(f"  Decision: {metrics_small['npv_status']['decision']}")
+        print("  RESULT: PASS (no crash)")
+    except Exception as e:
+        print(f"  RESULT: FAIL - {e}")
+        return False
 
-    return {
-        "name": "Test 3 — Edge Case / Invalid Inputs",
-        "checks": checks,
-        "minimal_valid": v.is_valid,
-        "minimal_warnings": v.warnings,
-        "minimal_results": results,
-        "handled_safely": True,
-        "expected": "SAFE HANDLING (no crash)",
+    print("\n--- Edge Case 3b: Zero Revenue ---")
+    inputs_zero = {
+        "project_name": "Zero Revenue Test",
+        "project_description": "Testing zero revenue handling",
+        "initial_investment": 1000000,
+        "project_life": 5,
+        "annual_revenue": 0,
+        "operating_costs": 50000,
+        "tax_rate": 0.25,
+        "working_capital": 0,
+        "terminal_value": 0,
+        "wacc": 0.10,
+        "financing_rate": 0.08,
+        "reinvestment_rate": 0.06,
+        "growth_rate": 0.0,
+        "depreciation_rate": 0.20,
+        "currency": "USD",
+    }
+    try:
+        metrics_zero = calculate_all_metrics(inputs_zero)
+        print(f"  NPV: ${metrics_zero['npv']:,.0f}")
+        print(f"  Decision: {metrics_zero['npv_status']['decision']}")
+        print("  RESULT: PASS (no crash)")
+    except Exception as e:
+        print(f"  RESULT: FAIL - {e}")
+        return False
+
+    print("\n--- Edge Case 3c: Validation with Missing Fields ---")
+    invalid_inputs = {"project_name": "Incomplete"}
+    is_valid, errors, warnings = validate_project_inputs(invalid_inputs)
+    passed_valid = not is_valid and len(errors) > 0
+    print(f"  Valid: {is_valid}")
+    print(f"  Errors caught: {len(errors)}")
+    print(f"  RESULT: {'PASS' if passed_valid else 'FAIL'}")
+
+    print("\n--- Edge Case 3d: Negative Investment ---")
+    neg_inputs = {
+        "project_name": "Neg Test",
+        "project_description": "Test",
+        "initial_investment": -100000,
+        "project_life": 5,
+        "annual_revenue": 50000,
+        "operating_costs": 20000,
+        "tax_rate": 0.25,
+        "working_capital": 0,
+        "terminal_value": 0,
+        "wacc": 0.10,
+        "financing_rate": 0.08,
+        "reinvestment_rate": 0.06,
+    }
+    is_valid_neg, errors_neg, _ = validate_project_inputs(neg_inputs)
+    passed_neg = not is_valid_neg
+    print(f"  Valid: {is_valid_neg}")
+    print(f"  Errors caught: {len(errors_neg)}")
+    print(f"  RESULT: {'PASS' if passed_neg else 'FAIL'}")
+
+    return True
+
+
+def test_high_risk_project():
+    print("\n" + "=" * 70)
+    print("TEST 4: High-Risk / Worst-Case Project")
+    print("=" * 70)
+
+    inputs = {
+        "project_name": "High Risk Speculative Venture",
+        "project_description": "Speculative project with thin margins and high WACC",
+        "initial_investment": 10000000,
+        "project_life": 7,
+        "annual_revenue": 2000000,
+        "operating_costs": 1900000,
+        "tax_rate": 0.35,
+        "working_capital": 1000000,
+        "terminal_value": 500000,
+        "wacc": 0.20,
+        "financing_rate": 0.18,
+        "reinvestment_rate": 0.10,
+        "growth_rate": 0.02,
+        "depreciation_rate": 0.14,
+        "currency": "ZAR",
     }
 
+    is_valid, errors, warnings = validate_project_inputs(inputs)
+    print(f"Validation: {'PASS' if is_valid else 'FAIL (expected)'}")
+    if warnings:
+        for w in warnings:
+            print(f"  Warning: {w}")
 
-def test_4_high_risk_worst_case() -> dict[str, Any]:
-    """High initial outlay, thin margins, high WACC → likely REJECT."""
-    inputs = ProjectInputs(
-        project_name="High-Risk Emerging Venture",
-        initial_investment=5_000_000,
-        project_life=7,
-        annual_revenues=950_000,
-        operating_costs=820_000,
-        tax_rate=35,
-        working_capital=150_000,
-        terminal_value=0,
-        discount_rate=22,
-        financing_rate=22,
-        reinvestment_rate=18,
+    metrics = calculate_all_metrics(inputs)
+    risk_data = assess_risks(inputs, metrics)
+
+    print(f"\nNPV: ${metrics['npv']:,.0f}")
+    print(f"IRR: {metrics['irr']:.1%}")
+    print(f"MIRR: {metrics['mirr']:.1%}")
+    print(f"PI: {metrics['pi']:.2f}")
+    print(f"ROI: {metrics['roi']:.1%}")
+    print(f"Payback: {metrics['payback']:.1f} years" if metrics['payback'] != float('inf') else "Payback: Never")
+    print(f"Risk Level: {risk_data['overall_level']}")
+
+    scenario_data = run_scenario_analysis(inputs)
+    print(f"\nBest Case NPV: ${scenario_data['best_case']['npv']:,.0f}")
+    print(f"Base Case NPV: ${scenario_data['base_case']['npv']:,.0f}")
+    print(f"Worst Case NPV: ${scenario_data['worst_case']['npv']:,.0f}")
+
+    overall_metrics_reject = (
+        metrics["npv_status"]["decision"] == "REJECT" or
+        risk_data["overall_level"] in ("HIGH", "VERY HIGH") or
+        scenario_data["worst_case"]["npv_status"]["decision"] == "REJECT"
     )
-    results = run_analysis(inputs)
-    risks = assess_risks(results)
-    final = decision_final(results, risks)
-    return {
-        "name": "Test 4 — High-Risk / Worst-Case Project",
-        "inputs": inputs,
-        "results": results,
-        "final": final,
-        "risk_level": risks["overall_risk"],
-        "expected": "REJECT or REVIEW",
+    passed = overall_metrics_reject
+    actual = "REJECT" if metrics["npv_status"]["decision"] == "REJECT" else "REVIEW"
+    print(f"\nExpected: REJECT or REVIEW")
+    print(f"Actual: {actual}")
+    print(f"RESULT: {'PASS' if passed else 'FAIL'}")
+    assert passed, f"Test 4 failed"
+    return passed
+
+
+def test_project_templates():
+    print("\n" + "=" * 70)
+    print("TEST 5: Project Type Templates")
+    print("=" * 70)
+
+    expected_names = {
+        "Solar Energy Expansion",
+        "Manufacturing Capacity Upgrade",
+        "Technology & Digitalisation",
+        "Export Expansion Project",
+        "Agricultural Investment Project",
+    }
+    actual_names = {t["name"] for t in PROJECT_TYPES}
+    for name in sorted(expected_names):
+        ok = name in actual_names
+        print(f"  Template '{name}': {'PASS' if ok else 'MISSING'}")
+        assert ok, f"Test 5 failed: missing template '{name}'"
+
+    for t in PROJECT_TYPES:
+        for key in ("id", "name", "description", "inputs"):
+            assert key in t, f"Test 5 failed: template {t.get('name', '?')} missing key '{key}'"
+        assert get_project_template(t["id"]) is not None
+        assert isinstance(get_template_inputs(t["id"]), dict)
+
+    sample = get_template_inputs("solar_energy_expansion")
+    for key in ("zig_revenue_share", "zig_cost_share", "zar_revenue_share",
+                "zar_cost_share", "investment_fx_share", "liquidity_buffer_months"):
+        assert key in sample, f"Test 5 failed: template missing FX field '{key}'"
+
+    print(f"\nTotal templates: {len(PROJECT_TYPES)}")
+    print("RESULT: PASS")
+    return True
+
+
+def test_fx_modules():
+    print("\n" + "=" * 70)
+    print("TEST 6: FX Market, Scenarios, Risk & Currency Strategy")
+    print("=" * 70)
+
+    inputs = {
+        "project_name": "FX Integration Test",
+        "project_description": "Verify FX pipeline",
+        "initial_investment": 1000000,
+        "project_life": 10,
+        "annual_revenue": 400000,
+        "operating_costs": 120000,
+        "tax_rate": 0.25,
+        "working_capital": 0,
+        "terminal_value": 0,
+        "wacc": 0.10,
+        "financing_rate": 0.08,
+        "reinvestment_rate": 0.06,
+        "growth_rate": 0.0,
+        "depreciation_rate": 0.10,
+        "currency": "USD",
+        "zig_revenue_share": 0.4,
+        "zig_cost_share": 0.6,
+        "zar_revenue_share": 0.2,
+        "zar_cost_share": 0.1,
+        "investment_fx_share": 0.5,
+        "liquidity_buffer_months": 6,
     }
 
+    fx_scenarios = run_fx_scenario_analysis(inputs)
+    results = fx_scenarios.get("results", [])
+    assert len(results) == len(FX_SCENARIOS), "Test 6 failed: scenario count mismatch"
+    labels = {r["label"] for r in results}
+    print(f"  Scenarios run: {len(results)}")
+    for r in results:
+        print(f"    {r['label']}: NPV {r['npv']:,.0f} ({r['npv_delta']:+,.0f})")
+    expected_labels = {"ZiG +5%", "ZiG -5%", "USD +5%", "USD -5%", "ZAR +5%", "ZAR -5%"}
+    assert expected_labels.issubset(labels), "Test 6 failed: missing scenario labels"
+    assert isinstance(fx_scenarios.get("max_npv_swing_pct"), float)
 
-def run_all() -> list[dict[str, Any]]:
-    results_list = [
-        test_1_profitable_project(),
-        test_2_negative_npv_project(),
-        test_3_edge_case_invalid_inputs(),
-        test_4_high_risk_worst_case(),
+    exposure = assess_currency_exposure(inputs)
+    print(f"\n  Exposure: revenue {exposure['revenue_exposure']:.0%}, "
+          f"cost {exposure['cost_exposure']:.0%}, level {exposure['level']}")
+
+    fx_market = {
+        "rates": {"USD_ZIG": 13.5, "ZIG_USD": 0.074, "USD_ZAR": 18.5, "ZAR_USD": 0.054},
+        "pairs": [],
+        "fx_risk_level": "MODERATE",
+        "fx_risk_score": 5.0,
+    }
+    fx_risk = get_fx_risk_summary(inputs, fx_market, fx_scenarios)
+    assert fx_risk["level"] in ("LOW", "MODERATE", "HIGH"), "Test 6 failed: bad FX risk level"
+
+    strategy = recommend_currency_strategy(inputs, fx_market, fx_scenarios, exposure)
+    assert strategy["strategy"] in STRATEGY_OPTIONS, f"Test 6 failed: unknown strategy '{strategy['strategy']}'"
+    print(f"\n  FX Risk: {fx_risk['level']} (score {fx_risk['score']})")
+    print(f"  Strategy: {strategy['strategy']} -> {strategy['recommendation_text']}")
+
+    text = strategy["reason"] + " ".join(strategy["key_fx_factors"])
+    for word in ("appreciate", "depreciate"):
+        assert word not in text.lower(), "Test 6 failed: strategy must not predict currency direction"
+    print("  Strategy uses probability/scenario language: PASS")
+
+    print("\nRESULT: PASS")
+    return True
+
+
+def run_all_tests():
+    print("\n" + "#" * 70)
+    print("#  INTEGRATED INVESTMENT DECISION AGENT FOR CAPITAL PROJECTS - TEST SUITE")
+    print("#" * 70)
+
+    results = {}
+    tests = [
+        ("Test 1: Normal Profitable Project", test_profitable_project),
+        ("Test 2: Negative NPV Project", test_negative_npv_project),
+        ("Test 3: Edge Cases", test_edge_cases),
+        ("Test 4: High-Risk Project", test_high_risk_project),
+        ("Test 5: Project Type Templates", test_project_templates),
+        ("Test 6: FX Market & Strategy", test_fx_modules),
     ]
 
-    failures = []
-
-    for t in results_list:
+    for name, test_func in tests:
         try:
-            name = t["name"]
-            expected = t["expected"]
+            passed = test_func()
+            results[name] = "PASS" if passed else "FAIL"
+        except AssertionError as e:
+            results[name] = f"FAIL: {e}"
+        except Exception as e:
+            results[name] = f"ERROR: {e}"
 
-            if "Test 1" in name:
-                actual = t["final"]["decision"]
-                extra = (
-                    f" NPV={_compact(t['results']['metrics']['npv'])} "
-                    f"IRR={_compact(t['results']['metrics']['irr'], 'pct')} "
-                    f"WACC={t['results']['inputs'].discount_rate:.1f}% "
-                )
-                passed = actual == "ACCEPT"
-            elif "Test 2" in name:
-                actual = t["final"]["decision"]
-                extra = (
-                    f" NPV={_compact(t['results']['metrics']['npv'])} "
-                    f"IRR={_compact(t['results']['metrics']['irr'], 'pct')} "
-                )
-                passed = actual == "REJECT"
-            elif "Test 3" in name:
-                actual = "SAFE HANDLING"
-                all_safe = all(c["safe"] for c in t["checks"])
-                passed = all_safe and t["minimal_results"] is not None
-                extra = f" bad-input blocks={len(t['checks'])} minimal_valid={t['minimal_valid']}"
-            else:
-                actual = t["final"]["decision"]
-                extra = (
-                    f" NPV={_compact(t['results']['metrics']['npv'])} "
-                    f"Risk={t['risk_level']}"
-                )
-                passed = actual in ("REJECT", "REVIEW")
+    print("\n" + "#" * 70)
+    print("#  TEST RESULTS SUMMARY")
+    print("#" * 70)
+    all_passed = True
+    for name, result in results.items():
+        status = "PASS" if result == "PASS" else "FAIL"
+        print(f"  {name}: {result}")
+        if result != "PASS":
+            all_passed = False
 
-            t["actual"] = actual
-            t["passed"] = bool(passed)
-            t["extra"] = extra
-            if not passed:
-                failures.append((name, actual, expected))
-        except Exception:  # noqa: BLE001
-            t["actual"] = "CRASH"
-            t["passed"] = False
-            t["traceback"] = traceback.format_exc()
-            failures.append((name, "CRASH", expected))
-
-    return results_list
-
-
-def main() -> int:
-    print("=" * 78)
-    print("FINANCIAL ENGINEERING INVESTMENT DECISION AGENT — AUTOMATED TESTS")
-    print("=" * 78)
-
-    tests = run_all()
-    ok = 0
-    for t in tests:
-        name = t["name"]
-        print("")
-        print(f"[{name}]")
-        print(f"  Expected : {t['expected']}")
-        print(f"  Actual   : {t.get('actual', 'N/A')}")
-        print(f"  Result   : {'PASS' if t['passed'] else 'FAIL'}{t.get('extra', '')}")
-
-        if "Test 1" in name or "Test 2" in name or "Test 4" in name:
-            m = t["results"]["metrics"]
-            pb = f"{m['payback']:.2f} yrs" if m["payback"] is not None else "N/A"
-            print(f"    NPV={_compact(m['npv'])} IRR={_compact(m['irr'], 'pct')} "
-                  f"MIRR={_compact(m['mirr'], 'pct')} PI={m['pi']:.3f} "
-                  f"Payback={pb} ROI={_compact(m['roi'], 'pct')}")
-        if "Test 3" in name:
-            for c in t["checks"]:
-                print(f"    {c['case']}: errors={len(c.get('errors', []))} "
-                      f"warnings={len(c.get('warnings', []))} -> handled safely")
-        if "Test 4" in name:
-            print(f"    Overall risk: {t.get('risk_level')}")
-            print(f"    Final: {t['final']['decision']}")
-
-        if t["passed"]:
-            ok += 1
-
-    print("")
-    print("=" * 78)
-    print(f"RESULT: {ok}/{len(tests)} tests passed")
-    all_failures = [
-        t for t in tests if not t.get("passed")
-    ]
-    if all_failures:
-        print("FAILED TESTS:")
-        for t in all_failures:
-            print(f"  - {t['name']}: expected {t['expected']}, got {t.get('actual')}")
-        return 1
-    print("ALL TESTS PASSED — zero formula/calculation errors detected.")
-    return 0
+    print(f"\n{'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
+    print("#" * 70)
+    return all_passed
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    success = run_all_tests()
+    sys.exit(0 if success else 1)

@@ -1,268 +1,174 @@
-"""Scenario and sensitivity analysis engine."""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any
-
-import numpy as np
-import pandas as pd
-
-from calculations import ProjectInputs, run_analysis
+from typing import Dict, List, Any
+from calculations import calculate_all_metrics
 
 
-@dataclass
-class ScenarioDefinition:
-    name: str
-    label: str
-    description: str
-    revenue_factor: float = 1.0
-    cost_factor: float = 1.0
-    wacc_adjustment: float = 0.0
-    extra: dict[str, float] | None = None
+def run_scenario_analysis(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    base_case = calculate_all_metrics(inputs)
 
-    def apply(self, base: ProjectInputs) -> ProjectInputs:
-        import copy
+    best_case_inputs = create_best_case(inputs)
+    best_case = calculate_all_metrics(best_case_inputs)
 
-        p = copy.deepcopy(base)
-        p.annual_revenues = base.annual_revenues * self.revenue_factor
-        p.operating_costs = base.operating_costs * self.cost_factor
-        p.discount_rate = base.discount_rate + self.wacc_adjustment
-        p.financing_rate = base.financing_rate + self.wacc_adjustment
-        p.reinvestment_rate = base.reinvestment_rate + self.wacc_adjustment
-        if self.extra:
-            for k, v in self.extra.items():
-                setattr(p, k, getattr(base, k) * v)
-        return p
+    worst_case_inputs = create_worst_case(inputs)
+    worst_case = calculate_all_metrics(worst_case_inputs)
 
+    base_decision = base_case["npv_status"]["decision"]
+    best_decision = best_case["npv_status"]["decision"]
+    worst_decision = worst_case["npv_status"]["decision"]
 
-def scenario_summary(result: dict[str, Any]) -> dict[str, Any]:
-    m = result["metrics"]
-    d = result["decisions"]
-    decision_status = _aggregate_decision(d)
+    base_case["scenario_label"] = "Base Case"
+    best_case["scenario_label"] = "Best Case"
+    worst_case["scenario_label"] = "Worst Case"
+
+    base_case["scenario_description"] = (
+        f"Base case assumes revenues of ${float(inputs.get('annual_revenue', 0)):,.0f}, "
+        f"operating costs of ${float(inputs.get('operating_costs', 0)):,.0f}, "
+        f"and WACC of {float(inputs.get('wacc', 0.1)):.1%}."
+    )
+    best_case["scenario_description"] = (
+        "Best case assumes optimistic conditions: revenues increased by 20%, "
+        "operating costs reduced by 10%, and WACC reduced by 2%."
+    )
+    worst_case["scenario_description"] = (
+        "Worst case assumes pessimistic conditions: revenues reduced by 20%, "
+        "operating costs increased by 10%, and WACC increased by 2%."
+    )
 
     return {
-        "npv": m["npv"],
-        "irr": m["irr"],
-        "mirr": m["mirr"],
-        "roi": m["roi"],
-        "payback": m["payback"],
-        "pi": m["pi"],
-        "decision": decision_status["status"],
-        "explanation": decision_status["reason"],
-        "life": m["project_life"],
+        "base_case": base_case,
+        "best_case": best_case,
+        "worst_case": worst_case,
+        "scenario_comparison": build_comparison_table(base_case, best_case, worst_case),
     }
 
 
-def _aggregate_decision(decisions: dict[str, Any]) -> dict[str, str]:
-    """Combine per-metric decisions into one overall verdict logic."""
-    statuses = [v["status"] for v in decisions.values()]
-    accepts = statuses.count("ACCEPT")
-    rejects = statuses.count("REJECT")
-    total = len(statuses)
-
-    if accepts == total:
-        status = "ACCEPT"
-        reason = (
-            "All primary financial metrics meet or exceed their required thresholds. The project "
-            "is expected to create value after accounting for the cost of capital, timing, "
-            "recovery and return on investment."
-        )
-    elif rejects == total:
-        status = "REJECT"
-        reason = (
-            "All primary financial metrics fail their required thresholds. The project is expected "
-            "to destroy value or fail to recover capital under the current assumptions."
-        )
-    elif accepts > rejects:
-        status = "ACCEPT"
-        reason = (
-            f"Most financial metrics ({accepts} of {total}) are favourable. The preponderance of "
-            "evidence supports proceeding, although full alignment across all indicators is absent."
-        )
-    elif rejects > accepts:
-        status = "REJECT"
-        reason = (
-            f"Most financial metrics ({rejects} of {total}) are unfavourable. The preponderance of "
-            "evidence argues against proceeding under the current assumptions."
-        )
-    else:
-        status = "REVIEW"
-        reason = (
-            "Financial evidence is mixed with a balanced split between favourable and unfavourable "
-            "metrics. The decision requires additional qualitative and risk review."
-        )
-    return {"status": status, "reason": reason}
+def create_best_case(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    modified = dict(inputs)
+    modified["annual_revenue"] = float(inputs.get("annual_revenue", 0)) * 1.20
+    modified["operating_costs"] = float(inputs.get("operating_costs", 0)) * 0.90
+    modified["wacc"] = max(0.01, float(inputs.get("wacc", 0.1)) - 0.02)
+    modified["terminal_value"] = float(inputs.get("terminal_value", 0)) * 1.25
+    return modified
 
 
-def build_scenarios(results: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Compute Best / Base / Worst cases."""
-    base_result = results
-    base_inputs: ProjectInputs = base_result["inputs"]
-
-    scenarios = {}
-    out = {}
-
-    for name, label, desc, rev_fac, cost_fac, wacc_adj in [
-        ("best", "Best Case", "Optimistic assumptions: revenues 15% above base, costs 10% below base.",
-         1.15, 0.90, -1.0),
-        ("base", "Base Case", "Central assumptions exactly as entered by the user.", 1.0, 1.0, 0.0),
-        ("worst", "Worst Case", "Pessimistic assumptions: revenues 20% below base, costs 15% above base.",
-         0.80, 1.15, +1.5),
-    ]:
-        sc = ScenarioDefinition(name, label, desc, rev_fac, cost_fac, wacc_adj)
-        scenarios[name] = sc
-        p = sc.apply(base_inputs)
-        res = run_analysis(p)
-        out[name] = {
-            "inputs": p,
-            "result": res,
-            "summary": scenario_summary(res),
-            "label": label,
-            "description": desc,
-        }
-
-    return out
+def create_worst_case(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    modified = dict(inputs)
+    modified["annual_revenue"] = float(inputs.get("annual_revenue", 0)) * 0.80
+    modified["operating_costs"] = float(inputs.get("operating_costs", 0)) * 1.10
+    modified["wacc"] = min(0.50, float(inputs.get("wacc", 0.1)) + 0.02)
+    modified["terminal_value"] = float(inputs.get("terminal_value", 0)) * 0.75
+    return modified
 
 
-def scenario_decision_text(name: str, s: dict[str, Any]) -> str:
-    summary = s["summary"]
-    label = s["label"]
-    npv = summary["npv"]
-    decision = summary["decision"]
-
-    if decision == "ACCEPT":
-        return (
-            f"{label} NPV = ${npv:,.0f}. The project generates positive value after discounting "
-            "expected cash flows at the applicable discount rate. Under these assumptions the "
-            "investment is financially attractive."
-        )
-    if decision == "REJECT":
-        return (
-            f"{label} NPV = ${npv:,.0f}. Under the {label.lower()} assumptions, the project's "
-            "discounted cash flows are insufficient to recover the initial investment, resulting "
-            "in negative value creation."
-        )
-    return (
-        f"{label} NPV = ${npv:,.0f}. The {label.lower()} outcome is mixed and requires "
-        "additional judgement before proceeding."
-    )
-
-
-def run_sensitivity(
-    base: ProjectInputs,
-    results: dict[str, Any],
-    steps: int = 9,
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Tornado-style sensitivity of NPV around base assumptions."""
-    vars_specs = [
-        ("wacc", "Discount Rate (WACC)", -0.3, 0.3, "percent", 1.0),
-        ("revenue", "Annual Revenues", -0.3, 0.3, "scalar", 1.0),
-        ("costs", "Operating Costs", -0.3, 0.3, "scalar", 1.0),
-        ("investment", "Initial Investment", -0.3, 0.3, "scalar", 1.0),
+def build_scenario_reason(scenario_data: Dict[str, Any]) -> str:
+    npv = scenario_data["npv"]
+    decision = scenario_data["npv_status"]["decision"]
+    statuses = [
+        ("NPV", scenario_data["npv_status"]["decision"]),
+        ("IRR", scenario_data["irr_status"]["decision"]),
+        ("MIRR", scenario_data["mirr_status"]["decision"]),
+        ("Payback", scenario_data["payback_status"]["decision"]),
+        ("PI", scenario_data["pi_status"]["decision"]),
+        ("ROI", scenario_data["roi_status"]["decision"]),
     ]
 
-    npv_base = results["metrics"]["npv"]
-    rows = []
-    for key, label, lo_frac, hi_frac, kind, scale in vars_specs:
-        if kind == "percent":
-            lo_npv = _npv_for_perturbation(base, key, base.discount_rate + lo_frac * 100)
-            hi_npv = _npv_for_perturbation(base, key, base.discount_rate + hi_frac * 100)
-        else:
-            lo_npv = _npv_for_perturbation(base, key, (1 + lo_frac) * scale)
-            hi_npv = _npv_for_perturbation(base, key, (1 + hi_frac) * scale)
-        rows.append(
-            {
-                "Variable": label,
-                "Id": key,
-                "NPV at -30%": lo_npv,
-                "NPV at Base": npv_base,
-                "NPV at +30%": hi_npv,
-                "Spread": abs(hi_npv - lo_npv),
-            }
+    favorable = [s for _, s in statuses if s == "ACCEPT"]
+    unfavorable = [s for _, s in statuses if s == "REJECT"]
+
+    total = len(statuses)
+    if decision == "ACCEPT":
+        return (
+            f"All primary financial metrics ({len(favorable)} of {total}) meet or exceed their required "
+            f"thresholds. The project is expected to create value after accounting for the cost of capital, "
+            f"timing, recovery and return on investment."
+        )
+    elif decision == "REJECT":
+        return (
+            f"Most financial metrics ({len(unfavorable)} of {total}) are unfavourable. The preponderance "
+            f"of evidence argues against proceeding under the current assumptions."
+        )
+    else:
+        return (
+            f"Financial metrics are mixed ({len(favorable)} favourable, {len(unfavorable)} unfavourable). "
+            f"Additional evidence is required before a final commitment."
         )
 
-    sensitivities = []
-    for r in rows:
-        var_label = r["Variable"]
-        lo = r["NPV at -30%"]
-        hi = r["NPV at +30%"]
-        base_npv = r["NPV at Base"]
-        # Determine direction of effect
-        direction = "negative" if (base_npv - lo) < 0 else "positive"
-        impact_desc = _interpret_variable(var_label, lo, hi, base_npv)
-        sensitivities.append(
-            {
-                "variable": var_label,
-                "npv_low": lo,
-                "npv_base": base_npv,
-                "npv_high": hi,
-                "explanation": impact_desc,
-            }
-        )
 
-    df = pd.DataFrame(rows).sort_values("Spread", ascending=False)
-    ranked = df["Variable"].tolist()
+def run_scenario_analysis(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    base_case = calculate_all_metrics(inputs)
 
-    most_sensitive = df.iloc[0]["Variable"] if len(df) else None
-    least_sensitive = df.iloc[-1]["Variable"] if len(df) else None
+    best_case_inputs = create_best_case(inputs)
+    best_case = calculate_all_metrics(best_case_inputs)
 
-    return df, {
-        "sensitivities": sensitivities,
-        "most_sensitive": most_sensitive,
-        "least_sensitive": least_sensitive,
-        "npv_base": npv_base,
+    worst_case_inputs = create_worst_case(inputs)
+    worst_case = calculate_all_metrics(worst_case_inputs)
+
+    base_case["scenario_label"] = "Base Case"
+    best_case["scenario_label"] = "Best Case"
+    worst_case["scenario_label"] = "Worst Case"
+
+    base_case["scenario_description"] = (
+        f"Base case assumes revenues of ${float(inputs.get('annual_revenue', 0)):,.0f}, "
+        f"operating costs of ${float(inputs.get('operating_costs', 0)):,.0f}, "
+        f"and WACC of {float(inputs.get('wacc', 0.1)):.1%}."
+    )
+    best_case["scenario_description"] = (
+        "Best case assumes optimistic conditions: revenues increased by 20%, "
+        "operating costs reduced by 10%, and WACC reduced by 2%."
+    )
+    worst_case["scenario_description"] = (
+        "Worst case assumes pessimistic conditions: revenues reduced by 20%, "
+        "operating costs increased by 10%, and WACC increased by 2%."
+    )
+
+    base_case["scenario_reason"] = build_scenario_reason(base_case)
+    best_case["scenario_reason"] = build_scenario_reason(best_case)
+    worst_case["scenario_reason"] = build_scenario_reason(worst_case)
+
+    return {
+        "base_case": base_case,
+        "best_case": best_case,
+        "worst_case": worst_case,
+        "scenario_comparison": build_comparison_table(base_case, best_case, worst_case),
     }
 
 
-def _npv_for_perturbation(base: ProjectInputs, key: str, value: float) -> float:
-    import copy
+def build_comparison_table(base: Dict, best: Dict, worst: Dict) -> Dict[str, Any]:
+    import pandas as pd
 
-    p = copy.deepcopy(base)
-    if key == "wacc":
-        p.discount_rate = value
-        p.financing_rate = value
-        p.reinvestment_rate = value
-    elif key == "revenue":
-        p.annual_revenues = base.annual_revenues * value
-    elif key == "costs":
-        p.operating_costs = base.operating_costs * value
-    elif key == "investment":
-        p.initial_investment = base.initial_investment * value
-    return run_analysis(p)["metrics"]["npv"]
+    rows = []
+    for label, data in [("Best Case", best), ("Base Case", base), ("Worst Case", worst)]:
+        rows.append({
+            "Scenario": label,
+            "NPV": data["npv"],
+            "IRR": data["irr"],
+            "MIRR": data["mirr"],
+            "PI": data["pi"],
+            "ROI": data["roi"],
+            "Payback (years)": data["payback"] if data["payback"] != float("inf") else "N/A",
+            "Decision": data["npv_status"]["decision"],
+        })
 
+    df = pd.DataFrame(rows)
 
-def _interpret_variable(var: str, lo: float, hi: float, base_npv: float) -> str:
-    if var == "Discount Rate (WACC)":
-        return (
-            "Raising the WACC reduces the present value of future cash flows, lowering NPV "
-            "(discounting effect); lowering it does the reverse. This reflects how expensive "
-            "the project's capital is."
-        )
-    if var == "Annual Revenues":
-        return (
-            "Revenues are the primary inflow driver. Higher revenue raises cash flows and NPV; "
-            "lower revenue erodes them, and the effect compounds over the project life."
-        )
-    if var == "Operating Costs":
-        return (
-            "Operating costs subtract directly from cash flows. Higher costs depress NPV and "
-            "lower costs improve it, with the swing persisting across every year of the project."
-        )
-    if var == "Initial Investment":
-        return (
-            "The initial investment sets the baseline outlay. A larger outlay reduces NPV "
-            "one-for-one in present-value terms; a smaller one improves it."
-        )
-    return "This variable shifts the base-case cash-flow stream, moving NPV in the direction described."
+    return {"table": df, "scenarios": {"best": best, "base": base, "worst": worst}}
 
 
-def sensitivity_interpretation(summary: dict[str, Any]) -> str:
-    most = summary["most_sensitive"]
-    least = summary["least_sensitive"]
-    return (
-        f"The most sensitive variable is {most} and the least sensitive is {least}. "
-        "Management should prioritise review, hedging and control of the most sensitive "
-        "variable because small deviations from the assumption have the largest impact on "
-        "project value and on the investment decision."
-    )
+def explain_scenario(scenario_data: Dict[str, Any]) -> str:
+    label = scenario_data.get("scenario_label", "Scenario")
+    npv = scenario_data["npv"]
+    decision = scenario_data["npv_status"]["decision"]
+    reason = scenario_data.get("scenario_reason", scenario_data["npv_status"]["reason"])
+
+    from data_validation import format_currency, format_pct
+
+    lines = [
+        f"### {label}",
+        f"**NPV:** {format_currency(npv)}",
+        f"**IRR:** {format_pct(scenario_data['irr'])}",
+        f"**MIRR:** {format_pct(scenario_data['mirr'])}",
+        f"**Decision:** {decision}",
+        "",
+        f"**Reason:** {reason}",
+    ]
+
+    return "\n".join(lines)
