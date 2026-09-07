@@ -952,7 +952,7 @@ def tab_fx_market_monitor(fx_market):
         rate = p.get("rate")
         board_rows.append({
             "Currency Pair": p["pair"],
-            "Live Rate": f"{rate:,.6f}" if isinstance(rate, (int, float)) else "—",
+            "Live Rate": str(rate) if isinstance(rate, (int, float)) else "—",
             "Source": p.get("source_label", "—"),
             "Date & Time": fx_analysis._fmt_ts(p.get("timestamp")),
             "Status": p.get("status", STATUS_UNAVAILABLE),

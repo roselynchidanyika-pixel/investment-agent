@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from calculations import calculate_all_metrics
@@ -33,8 +33,9 @@ PAIR_MEANINGS = {
     "ZAR/USD": "US dollars per 1 South African rand",
     "USD/ZWG": "Zimbabwe Gold (ZiG) per 1 US dollar",
     "ZWG/USD": "US dollars per 1 Zimbabwe Gold",
-    "ZAR/ZWG": "Zimbabwe Gold per 1 South African rand",
-    "ZWG/ZAR": "South African rand per 1 Zimbabwe Gold",
+    # Values follow the reference board: ZAR/ZWG = ZAR per ZiG, ZWG/ZAR = ZiG per ZAR.
+    "ZAR/ZWG": "South African rand per 1 Zimbabwe Gold",
+    "ZWG/ZAR": "Zimbabwe Gold per 1 South African rand",
 }
 
 TREND_DAYS = 30
@@ -192,9 +193,17 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
 
 
 def _fmt_ts(ts: Optional[datetime]) -> str:
+    """Format a timestamp as UTC ISO with seconds and +00:00 suffix (reference-board style)."""
     if ts is None:
         return "—"
-    return ts.strftime("%Y-%m-%dT%H:%M:%S") if ts.tzinfo is None else ts.isoformat(timespec="seconds")
+    try:
+        if ts.tzinfo is None:
+            ts = ts.astimezone(timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        return ts.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00"
+    except Exception:
+        return ts.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _resolve_base_entry(
@@ -342,12 +351,13 @@ def build_exchange_board(
     else:
         rows.append(row("ZWG_USD", None, STATUS_UNAVAILABLE, "—", None, 0.0, 0.0))
 
-    # ZAR/ZWG and ZWG/ZAR (cross pairs)
+    # ZAR/ZWG and ZWG/ZAR (cross pairs). Values follow the reference board:
+    # ZAR/ZWG = ZAR per 1 ZiG (usd_zar / usd_zwg), ZWG/ZAR = ZiG per 1 ZAR (usd_zwg / usd_zar).
     if usd_zar and usd_zwg:
         cross_status = _derived_status([base_zar["status"], base_zwg["status"]])
         cross_src = _derived_label(base_zar["source_label"], base_zwg["source_label"])
-        rows.append(row("ZAR_ZWG", usd_zwg / usd_zar, cross_status, cross_src, now, 0.0, 0.0))
-        rows.append(row("ZWG_ZAR", usd_zar / usd_zwg, cross_status, cross_src, now, 0.0, 0.0))
+        rows.append(row("ZAR_ZWG", usd_zar / usd_zwg, cross_status, cross_src, now, 0.0, 0.0))
+        rows.append(row("ZWG_ZAR", usd_zwg / usd_zar, cross_status, cross_src, now, 0.0, 0.0))
     else:
         rows.append(row("ZAR_ZWG", None, STATUS_UNAVAILABLE,
                         "—" if not (usd_zar or usd_zwg) else _derived_label(base_zar["source_label"], base_zwg["source_label"]),

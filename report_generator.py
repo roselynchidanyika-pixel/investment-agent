@@ -482,10 +482,10 @@ def _add_fx_market_section(doc, fx_market):
         ts = p.get("timestamp")
         rows.append([
             p.get("pair", ""),
-            f"{rate:,.6f}" if isinstance(rate, (int, float)) else "—",
+            str(rate) if isinstance(rate, (int, float)) else "—",
             p.get("status", "UNAVAILABLE"),
             p.get("source_label", "—"),
-            ts.strftime("%Y-%m-%dT%H:%M:%S") if ts else "—",
+            ts.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00" if ts else "—",
             f"{p.get('daily_change_pct', 0.0):+.2f}%",
             f"{p.get('month_trend_pct', 0.0):+.2f}%",
         ])
