@@ -1,3 +1,5 @@
+import os
+import json
 import requests
 from datetime import datetime, date, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -6,6 +8,34 @@ from calculations import calculate_all_metrics
 
 # Rates are stored as units of each currency per 1 USD.
 FALLBACK_RATES = {"USD": 1.0, "ZIG": 13.50, "ZAR": 18.50}
+
+# Persistence for the stored-rate history (live fetches + manual overrides).
+FX_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fx_rate_store.json")
+
+# Board statuses (legend).
+STATUS_LIVE = "LIVE"
+STATUS_STORED = "STORED"
+STATUS_STALE = "STALE"
+STATUS_MANUAL = "MANUAL OVERRIDE"
+STATUS_UNAVAILABLE = "UNAVAILABLE"
+
+STALE_HOURS = 24.0
+
+LIVE_SOURCES = {
+    "open_er": "open.er-api.com",
+    "frankfurter": "frankfurter.app (ECB)",
+}
+
+BOARD_PAIRS = ["USD/ZAR", "ZAR/USD", "USD/ZWG", "ZWG/USD", "ZAR/ZWG", "ZWG/ZAR"]
+
+PAIR_MEANINGS = {
+    "USD/ZAR": "South African rand per 1 US dollar",
+    "ZAR/USD": "US dollars per 1 South African rand",
+    "USD/ZWG": "Zimbabwe Gold (ZiG) per 1 US dollar",
+    "ZWG/USD": "US dollars per 1 Zimbabwe Gold",
+    "ZAR/ZWG": "Zimbabwe Gold per 1 South African rand",
+    "ZWG/ZAR": "South African rand per 1 Zimbabwe Gold",
+}
 
 TREND_DAYS = 30
 
@@ -29,22 +59,66 @@ STRATEGY_TEXT = {
 }
 
 
-def _fetch_current_rates() -> Tuple[Dict[str, float], str]:
-    """Fetch current rates from public APIs; falls back to managed reference rates."""
-    rates = dict(FALLBACK_RATES)
-    source = "estimate"
+def _fetch_open_er() -> Dict[str, float]:
+    """Fetch USD-based rates from open.er-api.com (preferred live source)."""
     try:
         resp = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("result") == "success":
                 api = data.get("rates", {})
-                if "ZAR" in api and api["ZAR"]:
-                    rates["ZAR"] = float(api["ZAR"])
-                    source = "live"
+                out = {}
+                if api.get("ZAR"):
+                    out["ZAR"] = float(api["ZAR"])
+                if api.get("ZWG"):
+                    out["ZWG"] = float(api["ZWG"])
+                return out
     except Exception:
         pass
-    return rates, source
+    return {}
+
+
+def _fetch_frankfurter() -> Dict[str, float]:
+    """Fallback live source: frankfurter.app / ECB."""
+    try:
+        resp = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"from": "USD", "to": "ZAR,ZWG"},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            rates = data.get("rates", {})
+            out = {}
+            if rates.get("ZAR"):
+                out["ZAR"] = float(rates["ZAR"])
+            if rates.get("ZWG"):
+                out["ZWG"] = float(rates["ZWG"])
+            return out
+    except Exception:
+        pass
+    return {}
+
+
+def fetch_live_rates() -> Tuple[Dict[str, float], str]:
+    """Fetch current USD/ZAR and USD/ZWG live rates.
+
+    Returns (rates, source) where source is one of LIVE_SOURCES keys or "none".
+    """
+    live = _fetch_open_er()
+    if live:
+        return live, "open_er"
+    live = _fetch_frankfurter()
+    if live:
+        return live, "frankfurter"
+    return {}, "none"
+
+
+def fetch_zar_trend() -> Tuple[float, float]:
+    """Return (daily % change, 30-day trend %) for USD/ZAR from exchange-rate history."""
+    history = _fetch_zar_history()
+    daily, trend, _ = _daily_and_trend_for_zar(history)
+    return daily, trend
 
 
 def _fetch_zar_history() -> Dict[str, float]:
@@ -84,48 +158,251 @@ def _daily_and_trend_for_zar(history: Dict[str, float]) -> Tuple[float, float, s
     return daily, trend, "live"
 
 
-def get_fx_market() -> Dict[str, Any]:
-    """Build the FX market snapshot used across the dashboard."""
-    rates, source = _fetch_current_rates()
-    history = _fetch_zar_history()
-    zar_daily, zar_trend, zar_source = _daily_and_trend_for_zar(history)
-    now = datetime.now()
+def load_fx_store(path: Optional[str] = None) -> Dict[str, Any]:
+    """Load the persisted stored-rate history (live fetches + manual overrides)."""
+    try:
+        p = path or FX_STORE_PATH
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
-    zig_usd = rates["ZIG"] if rates["ZIG"] else 0.0
-    zar_usd = rates["ZAR"] if rates["ZAR"] else 0.0
 
-    pairs = [
-        {"pair": "USD/ZiG", "rate": zig_usd, "rate_ccy": "ZiG",
-         "daily_change_pct": 0.0, "month_trend_pct": 0.0, "source": "estimate",
-         "meaning": "Zimbabwe Gold per 1 US dollar"},
-        {"pair": "ZiG/USD", "rate": 1.0 / zig_usd if zig_usd else 0.0, "rate_ccy": "USD",
-         "daily_change_pct": 0.0, "month_trend_pct": 0.0, "source": "estimate",
-         "meaning": "US dollars per 1 Zimbabwe Gold"},
-        {"pair": "USD/ZAR", "rate": zar_usd, "rate_ccy": "ZAR",
-         "daily_change_pct": zar_daily, "month_trend_pct": zar_trend, "source": zar_source,
-         "meaning": "South African rand per 1 US dollar"},
-        {"pair": "ZAR/USD", "rate": 1.0 / zar_usd if zar_usd else 0.0, "rate_ccy": "USD",
-         "daily_change_pct": -zar_daily, "month_trend_pct": -zar_trend, "source": zar_source,
-         "meaning": "US dollars per 1 South African rand"},
-    ]
+def save_fx_store(store: Dict[str, Any], path: Optional[str] = None) -> None:
+    """Persist the stored-rate history to disk. Never raises on failure."""
+    try:
+        p = path or FX_STORE_PATH
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(store, f, indent=2)
+    except Exception:
+        pass
 
-    fx_risk_score, fx_risk_level = _compute_fx_risk(pairs)
+
+def _parse_ts(raw: Any) -> Optional[datetime]:
+    if isinstance(raw, datetime):
+        return raw
+    if raw is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_ts(ts: Optional[datetime]) -> str:
+    if ts is None:
+        return "—"
+    return ts.strftime("%Y-%m-%dT%H:%M:%S") if ts.tzinfo is None else ts.isoformat(timespec="seconds")
+
+
+def _resolve_base_entry(
+    pair_key: str,
+    live_rates: Dict[str, float],
+    live_source: str,
+    store: Dict[str, Any],
+    overrides: Dict[str, Any],
+    now: datetime,
+) -> Dict[str, Any]:
+    """Resolve a base pair (USD_ZAR / USD_ZWG) with full status precedence.
+
+    Manual override always wins; then a fresh live rate; then stored history
+    (STORED if <= 24h old, otherwise shown as STALE); finally UNAVAILABLE.
+    """
+    ov = overrides.get(pair_key) if isinstance(overrides.get(pair_key), dict) else None
+    if ov:
+        try:
+            rate = float(ov.get("rate"))
+        except (TypeError, ValueError):
+            rate = None
+        if rate:
+            return {
+                "rate": rate,
+                "source_label": ov.get("source_label", "Manual override"),
+                "timestamp": _parse_ts(ov.get("timestamp")) or now,
+                "status": STATUS_MANUAL,
+                "origin": "manual",
+            }
+
+    live_key = "ZWG" if pair_key == "USD_ZWG" else "ZAR"
+    if live_rates.get(live_key):
+        return {
+            "rate": float(live_rates[live_key]),
+            "source_label": LIVE_SOURCES.get(live_source, live_source or "live API"),
+            "timestamp": now,
+            "status": STATUS_LIVE,
+            "origin": "live",
+        }
+
+    stored = store.get(pair_key) if isinstance(store.get(pair_key), dict) else None
+    if stored:
+        try:
+            rate = float(stored.get("rate"))
+        except (TypeError, ValueError):
+            rate = None
+        if rate:
+            ts = _parse_ts(stored.get("timestamp"))
+            age_hours = None
+            if ts is not None:
+                try:
+                    age_hours = (now - ts).total_seconds() / 3600.0
+                except TypeError:
+                    age_hours = None
+            status = STATUS_STORED if (age_hours is not None and age_hours <= STALE_HOURS) else STATUS_STALE
+            return {
+                "rate": rate,
+                "source_label": stored.get("source_label", stored.get("source", "stored history")),
+                "timestamp": ts,
+                "status": status,
+                "origin": stored.get("origin", "stored"),
+            }
+
+    return {"rate": None, "source_label": "—", "timestamp": None, "status": STATUS_UNAVAILABLE, "origin": None}
+
+
+def _derived_label(a: str, b: Optional[str] = None) -> str:
+    if b is None or a == b:
+        return f"{a} (derived)"
+    return f"{a} / {b} (derived)"
+
+
+def _derived_status(statuses: List[str]) -> str:
+    if any(s == STATUS_UNAVAILABLE for s in statuses):
+        return STATUS_UNAVAILABLE
+    if any(s == STATUS_STALE for s in statuses):
+        return STATUS_STALE
+    if any(s == STATUS_MANUAL for s in statuses):
+        return STATUS_MANUAL
+    if any(s == STATUS_STORED for s in statuses):
+        return STATUS_STORED
+    return STATUS_LIVE
+
+
+def build_exchange_board(
+    live_rates: Optional[Dict[str, float]] = None,
+    live_source: str = "",
+    store: Optional[Dict[str, Any]] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    now: Optional[datetime] = None,
+    zar_daily: float = 0.0,
+    zar_trend: float = 0.0,
+) -> Dict[str, Any]:
+    """Build the six-pair Live Exchange Rate Board with full status labelling.
+
+    Every pair carries {pair, key, rate, status, source_label, timestamp,
+    daily_change_pct, month_trend_pct, meaning}. A stale stored rate is never
+    silently used — it is always shown with status STALE.
+    """
+    live_rates = live_rates or {}
+    store = store or {}
+    overrides = overrides or {}
+    now = now if now is not None else datetime.now()
+
+    base_zar = _resolve_base_entry("USD_ZAR", live_rates, live_source, store, overrides, now)
+    base_zwg = _resolve_base_entry("USD_ZWG", live_rates, live_source, store, overrides, now)
+
+    usd_zar = base_zar["rate"]
+    usd_zwg = base_zwg["rate"]
+
+    def row(pair_key, rate, status, source_label, timestamp, daily, trend):
+        return {
+            "pair": pair_key.replace("_", "/"),
+            "key": pair_key,
+            "rate": rate,
+            "status": status,
+            "source_label": source_label,
+            "timestamp": timestamp,
+            "daily_change_pct": daily,
+            "month_trend_pct": trend,
+            "meaning": PAIR_MEANINGS.get(pair_key.replace("_", "/"), pair_key),
+        }
+
+    rows = []
+
+    # USD/ZAR and ZAR/USD
+    rows.append(row("USD_ZAR", usd_zar, base_zar["status"], base_zar["source_label"],
+                    base_zar["timestamp"], zar_daily, zar_trend))
+    if usd_zar:
+        rows.append(row("ZAR_USD", 1.0 / usd_zar,
+                        _derived_status([base_zar["status"]]),
+                        _derived_label(base_zar["source_label"]),
+                        base_zar["timestamp"], -zar_daily, -zar_trend))
+    else:
+        rows.append(row("ZAR_USD", None, STATUS_UNAVAILABLE, "—", None, 0.0, 0.0))
+
+    # USD/ZWG and ZWG/USD
+    rows.append(row("USD_ZWG", usd_zwg, base_zwg["status"], base_zwg["source_label"],
+                    base_zwg["timestamp"], 0.0, 0.0))
+    if usd_zwg:
+        rows.append(row("ZWG_USD", 1.0 / usd_zwg,
+                        _derived_status([base_zwg["status"]]),
+                        _derived_label(base_zwg["source_label"]),
+                        base_zwg["timestamp"], 0.0, 0.0))
+    else:
+        rows.append(row("ZWG_USD", None, STATUS_UNAVAILABLE, "—", None, 0.0, 0.0))
+
+    # ZAR/ZWG and ZWG/ZAR (cross pairs)
+    if usd_zar and usd_zwg:
+        cross_status = _derived_status([base_zar["status"], base_zwg["status"]])
+        cross_src = _derived_label(base_zar["source_label"], base_zwg["source_label"])
+        rows.append(row("ZAR_ZWG", usd_zwg / usd_zar, cross_status, cross_src, now, 0.0, 0.0))
+        rows.append(row("ZWG_ZAR", usd_zar / usd_zwg, cross_status, cross_src, now, 0.0, 0.0))
+    else:
+        rows.append(row("ZAR_ZWG", None, STATUS_UNAVAILABLE,
+                        "—" if not (usd_zar or usd_zwg) else _derived_label(base_zar["source_label"], base_zwg["source_label"]),
+                        None, 0.0, 0.0))
+        rows.append(row("ZWG_ZAR", None, STATUS_UNAVAILABLE,
+                        "—" if not (usd_zar or usd_zwg) else _derived_label(base_zar["source_label"], base_zwg["source_label"]),
+                        None, 0.0, 0.0))
+
+    fx_risk_score, fx_risk_level = _compute_fx_risk(rows)
+
+    effective_zwg_usd = usd_zwg or FALLBACK_RATES["ZIG"]
+    effective_zar_usd = usd_zar or FALLBACK_RATES["ZAR"]
 
     return {
-        "current": rates,
-        "pairs": pairs,
+        "current": {
+            "USD": 1.0,
+            "ZIG": effective_zwg_usd,
+            "ZWG": effective_zwg_usd,
+            "ZAR": effective_zar_usd,
+            "ZAR_ZWG": effective_zwg_usd / effective_zar_usd if effective_zar_usd else 0.0,
+        },
+        "pairs": rows,
         "as_of": now,
-        "source": source,
+        "live_source": live_source,
         "fx_risk_level": fx_risk_level,
         "fx_risk_score": fx_risk_score,
-        "is_live": any(p["source"] == "live" for p in pairs),
+        "is_live": any(r["status"] in (STATUS_LIVE, STATUS_STORED) for r in rows),
+        "store_count": len(store),
     }
+
+
+def get_fx_market() -> Dict[str, Any]:
+    """Build a standalone FX market snapshot (live where available).
+
+    Backward-compatible wrapper; the dashboard uses build_exchange_board with
+    the persisted store and manual overrides instead.
+    """
+    live, source = fetch_live_rates()
+    zar_daily, zar_trend = fetch_zar_trend()
+    return build_exchange_board(
+        live_rates=live,
+        live_source=source,
+        store=load_fx_store(),
+        now=datetime.now(),
+        zar_daily=zar_daily,
+        zar_trend=zar_trend,
+    )
 
 
 def _compute_fx_risk(pairs: List[Dict[str, Any]]) -> Tuple[float, str]:
     score = 2.0  # baseline structural risk for an emerging-market, multi-currency setting
     for p in pairs:
-        if p.get("source") != "live":
+        if p["pair"] in ("USD/ZWG", "ZWG/USD") and p.get("status") != STATUS_UNAVAILABLE:
+            score += 1.0  # ZiG is a young, thinly traded currency — structural uncertainty
+        if p.get("status") not in (STATUS_LIVE, STATUS_STORED):
             continue
         vol = max(abs(p.get("daily_change_pct", 0.0)), abs(p.get("month_trend_pct", 0.0)))
         if vol >= 5.0:
@@ -134,8 +411,6 @@ def _compute_fx_risk(pairs: List[Dict[str, Any]]) -> Tuple[float, str]:
             score += 2.0
         elif vol >= 0.5:
             score += 1.0
-    if any(p["pair"] == "USD/ZiG" for p in pairs):
-        score += 1.0  # ZiG is a young, thinly traded currency — structural uncertainty
     score = min(10.0, max(1.0, round(score, 1)))
 
     if score <= 3.0:

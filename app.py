@@ -27,6 +27,9 @@ import fx_analysis
 from fx_analysis import (
     get_fx_market, run_fx_scenario_analysis, assess_currency_exposure,
     recommend_currency_strategy, get_fx_risk_summary, STRATEGY_TEXT,
+    load_fx_store, save_fx_store, fetch_live_rates, fetch_zar_trend,
+    build_exchange_board, LIVE_SOURCES,
+    STATUS_LIVE, STATUS_STORED, STATUS_STALE, STATUS_MANUAL, STATUS_UNAVAILABLE,
 )
 
 st.set_page_config(
@@ -53,16 +56,95 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=300)
+FX_REFRESH_OFF = "Off"
+FX_REFRESH_OPTIONS = ["Every 15 minutes", FX_REFRESH_OFF, "Every 60 minutes"]
+FX_INTERVAL_SECONDS = {"Every 15 minutes": 15 * 60, FX_REFRESH_OFF: None, "Every 60 minutes": 60 * 60}
+FX_BASE_PAIRS = ["USD_ZAR", "USD_ZWG"]
+
+
+def _fx_session_init():
+    """Initialise session state for the Live Exchange Rate Board."""
+    if "fx_store" not in st.session_state:
+        store = load_fx_store()
+        overrides = {
+            k: v for k, v in store.items()
+            if isinstance(v, dict) and v.get("origin") == "manual"
+        }
+        st.session_state["fx_store"] = store
+        st.session_state["fx_overrides"] = overrides
+    if "fx_last_live" not in st.session_state:
+        st.session_state["fx_last_live"] = None
+    if "fx_zar_trend" not in st.session_state:
+        st.session_state["fx_zar_trend"] = (0.0, 0.0)
+    if "fx_refresh_interval" not in st.session_state:
+        st.session_state["fx_refresh_interval"] = "Every 15 minutes"
+
+
+def _has_manual_override(pair_key):
+    ov = st.session_state.get("fx_overrides", {}).get(pair_key)
+    return bool(ov and ov.get("rate"))
+
+
+def _fx_fetch_live_and_store():
+    """Fetch live rates, write them into the stored-rate history, and persist."""
+    live, source = fetch_live_rates()
+    store = dict(st.session_state.get("fx_store", {}))
+    now = datetime.now()
+    live_key_for = {"USD_ZAR": "ZAR", "USD_ZWG": "ZWG"}
+    for pair_key, lk in live_key_for.items():
+        if live.get(lk) and not _has_manual_override(pair_key):
+            store[pair_key] = {
+                "rate": float(live[lk]),
+                "origin": "live",
+                "source_label": LIVE_SOURCES.get(source, source or "live API"),
+                "timestamp": now.isoformat(timespec="seconds"),
+            }
+    save_fx_store(store)
+    st.session_state["fx_store"] = store
+    st.session_state["fx_last_live"] = {"rates": live, "source": source, "at": now}
+    try:
+        st.session_state["fx_zar_trend"] = fetch_zar_trend()
+    except Exception:
+        st.session_state["fx_zar_trend"] = (0.0, 0.0)
+
+
 def load_fx_market():
-    """Load the live FX market snapshot. Auto-refreshes after the TTL expires."""
-    return get_fx_market()
+    """Build the FX market board from live data + stored-rate history + manual overrides.
+
+    Auto-refreshes per the selected interval (Off disables fetching). A stored rate
+    older than 24h is shown as STALE and never silently used.
+    """
+    _fx_session_init()
+    interval = st.session_state.get("fx_refresh_interval", "Every 15 minutes")
+    secs = FX_INTERVAL_SECONDS.get(interval)
+    last = st.session_state.get("fx_last_live")
+    need_fetch = last is None
+    if secs and last is not None:
+        try:
+            age = (datetime.now() - last["at"]).total_seconds()
+            if age >= secs:
+                need_fetch = True
+        except TypeError:
+            need_fetch = True
+    if need_fetch:
+        _fx_fetch_live_and_store()
+        last = st.session_state.get("fx_last_live")
+    live = last or {}
+    zar_daily, zar_trend = st.session_state.get("fx_zar_trend", (0.0, 0.0))
+    return build_exchange_board(
+        live_rates=(live or {}).get("rates", {}),
+        live_source=(live or {}).get("source", ""),
+        store=st.session_state.get("fx_store", {}),
+        overrides=st.session_state.get("fx_overrides", {}),
+        zar_daily=zar_daily,
+        zar_trend=zar_trend,
+    )
 
 
 def build_rates_dict(market):
     """Convert the FX market snapshot into the legacy {USD, ZIG, ZAR, PAIR: rate} dict."""
     rates = dict(market.get("current", {"USD": 1.0, "ZIG": 13.50, "ZAR": 18.50}))
-    zig = rates.get("ZIG", 0)
+    zig = rates.get("ZIG", rates.get("ZWG", 0))
     zar = rates.get("ZAR", 0)
     rates["USD_ZAR"] = zar
     rates["USD_ZIG"] = zig
@@ -74,10 +156,7 @@ def build_rates_dict(market):
 
 
 def refresh_fx_market():
-    try:
-        load_fx_market.clear()
-    except Exception:
-        st.cache_data.clear()
+    _fx_fetch_live_and_store()
     st.rerun()
 
 
@@ -816,9 +895,23 @@ def tab_sensitivity(sensitivity_data, inputs):
                 st.dataframe(df_disp, use_container_width=True, hide_index=True)
 
 
+def _fx_status_colour(status):
+    return {
+        STATUS_LIVE: "color: #0a7d0a; font-weight: 600;",
+        STATUS_STORED: "color: #4a4a4a;",
+        STATUS_STALE: "color: #c46600; font-weight: 600;",
+        STATUS_MANUAL: "color: #004d80; font-weight: 600;",
+        STATUS_UNAVAILABLE: "color: #c41e3a; font-weight: 600;",
+    }.get(status, "")
+
+
 def tab_fx_market_monitor(fx_market):
-    st.header("Live FX Market Monitor")
-    st.write("Live exchange rates for the primary multi-currency environment (USD / ZiG / ZAR).")
+    st.markdown("## Live Exchange Rate Board — USD / ZAR / ZiG")
+    st.caption(
+        "All six currency pairs. Live source: **open.er-api.com** (fallback: **frankfurter.app / ECB**). "
+        "Manual overrides and stored-rate history are explicitly labelled; an outdated stored rate is "
+        "**never** silently used — it is shown as **STALE**."
+    )
 
     pairs = fx_market.get("pairs", [])
     fx_level = fx_market.get("fx_risk_level", "MODERATE")
@@ -827,51 +920,146 @@ def tab_fx_market_monitor(fx_market):
 
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
-        st.metric("FX Risk Level", fx_level, help="Assessed from observed 30-day volatility + structural factors.")
+        st.metric("FX Risk Level", fx_level, help="Assessed from observed volatility + structural factors.")
     with col_b:
         st.metric("FX Risk Score", f"{fx_score:.1f}/10")
     with col_c:
-        st.metric("Data Source", "Live API" if fx_market.get("is_live") else "Estimate", help="ZAR is live where available; ZiG is a managed estimate.")
+        live_count = sum(1 for p in pairs if p.get("status") == STATUS_LIVE)
+        st.metric("Live Pairs", f"{live_count}/{len(pairs)}", help="Pairs with a fresh rate from the provider this session.")
     with col_d:
         st.metric("Last Updated", as_of.strftime("%H:%M:%S") if as_of else "—")
 
-    if st.button("Refresh FX Data Now", type="primary"):
-        refresh_fx_market()
+    opt_col, btn_col = st.columns([4, 1])
+    with opt_col:
+        interval = st.radio(
+            "Auto-refresh interval",
+            FX_REFRESH_OPTIONS,
+            horizontal=True,
+            index=FX_REFRESH_OPTIONS.index(st.session_state.get("fx_refresh_interval", "Every 15 minutes")) if st.session_state.get("fx_refresh_interval") in FX_REFRESH_OPTIONS else 0,
+            help="Freshly fetched rates are written to the stored-rate history; on later sessions they show as STORED (or STALE if older than 24 hours).",
+        )
+        st.session_state["fx_refresh_interval"] = interval
+    with btn_col:
+        st.markdown("")
+        st.markdown("")
+        if st.button("Refresh Now", type="primary", use_container_width=True):
+            refresh_fx_market()
 
-    st.caption("Auto-refresh: market data re-fetches automatically after the 5-minute cache expiry on the next interaction.")
+    st.markdown("---")
 
-    if pairs:
-        rows = []
-        for p in pairs:
-            daily = p.get("daily_change_pct", 0.0)
-            trend = p.get("month_trend_pct", 0.0)
-            rows.append({
-                "Pair": p["pair"],
-                "Current Rate": f"{p['rate']:.4f}",
-                "Daily Change %": f"{daily:+.2f}%" if p.get("source") == "live" else f"{daily:+.2f}% (est.)",
-                "1-Month Trend %": f"{trend:+.2f}%" if p.get("source") == "live" else f"{trend:+.2f}% (est.)",
-                "Source": "Live API" if p.get("source") == "live" else "Estimate",
-                "Meaning": p.get("meaning", ""),
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    board_rows = []
+    for p in pairs:
+        rate = p.get("rate")
+        board_rows.append({
+            "Currency Pair": p["pair"],
+            "Live Rate": f"{rate:,.6f}" if isinstance(rate, (int, float)) else "—",
+            "Source": p.get("source_label", "—"),
+            "Date & Time": fx_analysis._fmt_ts(p.get("timestamp")),
+            "Status": p.get("status", STATUS_UNAVAILABLE),
+        })
+    df_board = pd.DataFrame(board_rows)
 
-        fig = go.Figure()
-        labels = [p["pair"] for p in pairs]
-        rates = [p["rate"] for p in pairs]
-        fig.add_trace(go.Bar(
-            x=labels, y=rates,
-            marker_color=["#0066cc", "#c49b00", "#0a7d0a", "#8a2be2"],
-            text=[f"{r:.4f}" for r in rates], textposition="outside",
-        ))
-        fig.update_layout(title="Live Exchange Rates", template="plotly_white",
-                          yaxis_title="Units per 1 USD (as displayed)", height=380)
-        st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(
+        df_board.style
+        .map(_fx_status_colour, subset=["Status"])
+        .set_properties(**{"text-align": "left"}),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Currency Pair": st.column_config.TextColumn("Currency Pair"),
+            "Live Rate": st.column_config.TextColumn("Live Rate"),
+            "Source": st.column_config.TextColumn("Source"),
+            "Date & Time": st.column_config.TextColumn("Date & Time"),
+            "Status": st.column_config.TextColumn("Status"),
+        },
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        .fx-legend {{ display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 14px;
+                      background: #f7f9fc; border: 1px solid #e3e8f0; border-radius: 8px;
+                      margin: 8px 0 4px 0; font-size: 0.9em; }}
+        .fx-legend span {{ white-space: nowrap; }}
+        .fx-live {{ color: #0a7d0a; font-weight: 600; }}
+        .fx-stored {{ color: #4a4a4a; }}
+        .fx-stale {{ color: #c46600; font-weight: 600; }}
+        .fx-manual {{ color: #004d80; font-weight: 600; }}
+        .fx-una {{ color: #c41e3a; font-weight: 600; }}
+        </style>
+        <div class="fx-legend">
+            <span>Status legend:&nbsp;</span>
+            <span class="fx-live">● LIVE — fresh from provider</span>
+            <span class="fx-manual">● MANUAL OVERRIDE — user-entered, always wins</span>
+            <span class="fx-stored">● STORED — last fetched value, still valid</span>
+            <span class="fx-stale">● STALE — stored value older than 24h</span>
+            <span class="fx-una">● UNAVAILABLE — no rate</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Manual overrides (user-entered rate — always wins over live and stored data)"):
+        effective = {p["key"]: p["rate"] for p in pairs}
+        u1, u2 = st.columns(2)
+        zar_seed = effective.get("USD_ZAR") or 0.0
+        zwg_seed = effective.get("USD_ZWG") or 0.0
+        zar_val = u1.number_input(
+            "USD/ZAR manual rate", value=float(zar_seed), min_value=0.0,
+            step=0.01, format="%.6f",
+            key=f"fx_ov_usd_zar_{fx_analysis._fmt_ts(as_of) if as_of else 'init'}",
+            help="Set an overriding USD/ZAR rate. Derived pairs (ZAR/USD, ZAR/ZWG, ZWG/ZAR) follow.",
+        )
+        zwg_val = u2.number_input(
+            "USD/ZWG manual rate", value=float(zwg_seed), min_value=0.0,
+            step=0.01, format="%.6f",
+            key=f"fx_ov_usd_zwg_{fx_analysis._fmt_ts(as_of) if as_of else 'init'}",
+            help="Set an overriding USD/ZWG (ZiG) rate. Derived pairs (ZWG/USD, ZAR/ZWG, ZWG/ZAR) follow.",
+        )
+        b1, b2, _ = st.columns([1, 1, 2])
+        if b1.button("Apply overrides", type="primary", use_container_width=True):
+            now_iso = datetime.now().isoformat(timespec="seconds")
+            store = dict(st.session_state.get("fx_store", {}))
+            overrides = dict(st.session_state.get("fx_overrides", {}))
+            for pair_key, val in (("USD_ZAR", zar_val), ("USD_ZWG", zwg_val)):
+                if val and val > 0:
+                    entry = {"rate": float(val), "origin": "manual",
+                             "source_label": "Manual override", "timestamp": now_iso}
+                    overrides[pair_key] = entry
+                    store[pair_key] = entry
+            st.session_state["fx_store"] = store
+            st.session_state["fx_overrides"] = overrides
+            save_fx_store(store)
+            st.rerun()
+        if b2.button("Clear overrides", use_container_width=True):
+            store = dict(st.session_state.get("fx_store", {}))
+            overrides = dict(st.session_state.get("fx_overrides", {}))
+            for pair_key in FX_BASE_PAIRS:
+                overrides.pop(pair_key, None)
+            store = {k: v for k, v in store.items() if not (isinstance(v, dict) and v.get("origin") == "manual")}
+            st.session_state["fx_store"] = store
+            st.session_state["fx_overrides"] = overrides
+            save_fx_store(store)
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("Pair Details")
+    detail_rows = []
+    for p in pairs:
+        detail_rows.append({
+            "Pair": p["pair"],
+            "Meaning": p.get("meaning", ""),
+            "Daily Change %": f"{p.get('daily_change_pct', 0.0):+.2f}%",
+            "1-Month Trend %": f"{p.get('month_trend_pct', 0.0):+.2f}%",
+        })
+    st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
     st.info(
-        "ZIG (Zimbabwe Gold) rates are indicative estimates because no reliable public ZIG data feed is "
-        "available; ZAR values are pulled live where the API responds. Always verify transaction rates "
-        "with your bank or an authorized foreign exchange dealer before executing any conversion. "
-        "No assumption is made about the future direction of any currency."
+        "Rates are sourced live from open.er-api.com (fallback: frankfurter.app / ECB) where available. "
+        "ZiG (ZWG) has no reliable public feed, so its rate depends on stored history or a manual override — "
+        "never silently reused when outdated. Always verify transaction rates with your bank or an authorized "
+        "foreign exchange dealer before executing any conversion. No assumption is made about the future "
+        "direction of any currency."
     )
 
 

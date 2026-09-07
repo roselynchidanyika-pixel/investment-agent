@@ -468,24 +468,40 @@ def _add_sensitivity_analysis(doc, sensitivity_data):
 def _add_fx_market_section(doc, fx_market):
     _add_heading(doc, "17. FX Market Monitor")
     doc.add_paragraph(
-        "Live exchange rates monitored for the multi-currency environment (USD / ZiG / ZAR). "
-        "ZAR values are live where the API responds; ZiG values are managed estimates because no "
-        "reliable public ZIG feed is available. No assumption is made about the future direction of "
-        "any currency."
+        "Live exchange rate board for the multi-currency environment (USD / ZAR / ZiG). "
+        "Live source is open.er-api.com with frankfurter.app (ECB) as fallback. Manual overrides and "
+        "stored-rate history are explicitly labelled: a stored rate is valid for 24 hours before it is "
+        "shown as STALE, and an outdated stored rate is never silently used. No assumption is made about "
+        "the future direction of any currency."
     )
 
     pairs = fx_market.get("pairs", [])
     rows = []
     for p in pairs:
+        rate = p.get("rate")
+        ts = p.get("timestamp")
         rows.append([
             p.get("pair", ""),
-            f"{p.get('rate', 0):.4f}",
-            f"{p.get('daily_change_pct', 0):+.2f}%",
-            f"{p.get('month_trend_pct', 0):+.2f}%",
-            "Live API" if p.get("source") == "live" else "Estimate",
+            f"{rate:,.6f}" if isinstance(rate, (int, float)) else "—",
+            p.get("status", "UNAVAILABLE"),
+            p.get("source_label", "—"),
+            ts.strftime("%Y-%m-%dT%H:%M:%S") if ts else "—",
+            f"{p.get('daily_change_pct', 0.0):+.2f}%",
+            f"{p.get('month_trend_pct', 0.0):+.2f}%",
         ])
     if rows:
-        _add_styled_table(doc, ["Pair", "Current Rate", "Daily Change", "1-Month Trend", "Source"], rows)
+        _add_styled_table(
+            doc,
+            ["Currency Pair", "Live Rate", "Status", "Source", "Date & Time", "Daily Change", "1-Month Trend"],
+            rows,
+        )
+
+    doc.add_paragraph()
+    doc.add_paragraph(
+        "Status legend: LIVE (fresh from provider) · MANUAL OVERRIDE (user-entered, always wins) · "
+        "STORED (last fetched value, still valid) · STALE (stored value older than 24h) · "
+        "UNAVAILABLE (no rate)."
+    )
 
     doc.add_paragraph()
     p = doc.add_paragraph()
