@@ -109,7 +109,7 @@ _SLOT_OVERRIDES = {
     },
 }
 
-_SAMPLE_LABELS = {0: "Project A", 1: "Project B", 2: "Project C"}
+_SAMPLE_LABELS = {0: "A", 1: "B", 2: "C"}
 
 
 def _build_sample_slots() -> List[Dict[str, Any]]:
@@ -347,7 +347,7 @@ def _build_recommendation(df: pd.DataFrame, evaluated: List[Dict[str, Any]]) -> 
     return {
         "winner": str(winner),
         "winner_name": winner_name,
-        "rank_order": [r["Project"] for r in df.itertuples()],
+        "rank_order": df["Project"].tolist(),
         "what": what,
         "why": why,
         "evidence": evidence,

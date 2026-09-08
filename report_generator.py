@@ -9,6 +9,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 
+from data_validation import format_currency, format_pct
+
 
 def generate_management_report(
     inputs: Dict[str, Any],
@@ -482,10 +484,10 @@ def _add_fx_market_section(doc, fx_market):
         ts = p.get("timestamp")
         rows.append([
             p.get("pair", ""),
-            str(rate) if isinstance(rate, (int, float)) else "—",
+            str(rate) if isinstance(rate, (int, float)) else "â€”",
             p.get("status", "UNAVAILABLE"),
-            p.get("source_label", "—"),
-            ts.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00" if ts else "—",
+            p.get("source_label", "â€”"),
+            ts.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00" if ts else "â€”",
             f"{p.get('daily_change_pct', 0.0):+.2f}%",
             f"{p.get('month_trend_pct', 0.0):+.2f}%",
         ])
@@ -498,8 +500,8 @@ def _add_fx_market_section(doc, fx_market):
 
     doc.add_paragraph()
     doc.add_paragraph(
-        "Status legend: LIVE (fresh from provider) · MANUAL OVERRIDE (user-entered, always wins) · "
-        "STORED (last fetched value, still valid) · STALE (stored value older than 24h) · "
+        "Status legend: LIVE (fresh from provider) Â· MANUAL OVERRIDE (user-entered, always wins) Â· "
+        "STORED (last fetched value, still valid) Â· STALE (stored value older than 24h) Â· "
         "UNAVAILABLE (no rate)."
     )
 
@@ -528,7 +530,7 @@ def _add_fx_scenario_section(doc, fx_exposure, fx_scenarios, inputs):
 
     if fx_scenarios:
         doc.add_paragraph()
-        doc.add_paragraph("FX Scenario Analysis (±5%):")
+        doc.add_paragraph("FX Scenario Analysis (Â±5%):")
         results = fx_scenarios.get("results", [])
         scen_rows = []
         for r in results:
@@ -553,7 +555,7 @@ def _add_fx_scenario_section(doc, fx_exposure, fx_scenarios, inputs):
         if declined:
             doc.add_paragraph(f"Scenarios that would turn the project non-viable: {', '.join(declined)}.")
         else:
-            doc.add_paragraph("The project remains viable under all ±5% exchange-rate scenarios.")
+            doc.add_paragraph("The project remains viable under all Â±5% exchange-rate scenarios.")
 
 
 def _add_fx_strategy_section(doc, currency_strategy, fx_risk, fx_market):
@@ -585,7 +587,7 @@ def _add_fx_strategy_section(doc, currency_strategy, fx_risk, fx_market):
         "This recommendation is based on live FX data where available, the project's currency "
         "requirements, expected cash flows, liquidity needs and the scenario analysis. It reflects "
         "current market conditions and does not assume that USD, ZiG or ZAR will appreciate or "
-        "depreciate in the future — exchange-rate outcomes remain uncertain."
+        "depreciate in the future â€” exchange-rate outcomes remain uncertain."
     )
 
 
@@ -741,7 +743,7 @@ def generate_comparison_report(
     doc.add_page_break()
 
     _add_comparison_executive_summary(doc, result)
-    _add_comparison_methodology(doc)
+    _add_comparison_methodology(doc, result)
     _add_comparison_matrix(doc, result)
     _add_comparison_ranking(doc, result)
     _add_comparison_scenarios(doc, result)
@@ -786,7 +788,7 @@ def _add_comparison_title(doc, result):
         doc.add_paragraph()
         winner_para = doc.add_paragraph()
         winner_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = winner_para.add_run(f"RECOMMENDED: Project {rec['winner']} � {rec.get('winner_name', '')}")
+        run = winner_para.add_run(f"RECOMMENDED: Project {rec['winner']} — {rec.get('winner_name', '')}")
         run.bold = True
         run.font.size = Pt(16)
         run.font.color.rgb = RGBColor(0, 128, 0)
@@ -894,7 +896,7 @@ def _add_comparison_project_section(doc, bundle):
     fx_risk = bundle.get("fx_risk", {})
     strategy = bundle.get("currency_strategy", {})
 
-    _add_heading(doc, f"6. Project {label} � {name}", level=2)
+    _add_heading(doc, f"6. Project {label} — {name}", level=2)
 
     metric_rows = [
         ["NPV", format_currency(metrics.get("npv", 0), ccy), metrics.get("npv_status", {}).get("decision", "N/A")],
@@ -935,7 +937,7 @@ def _add_comparison_project_section(doc, bundle):
     ]
     _add_styled_table(doc, ["Scenario", "NPV"], scen_rows)
 
-    _add_heading(doc, "Sensitivity � Most Influential Drivers", level=3)
+    _add_heading(doc, "Sensitivity — Most Influential Drivers", level=3)
     for s in (sensitivity_data.get("ranking") or [])[:3]:
         label = s.get("label", s.get("variable", ""))
         doc.add_paragraph(f"- {label}: NPV range {s.get('npv_range', 0):,.0f}", style="List Bullet")
@@ -943,7 +945,7 @@ def _add_comparison_project_section(doc, bundle):
     _add_heading(doc, "FX Risk & Currency Strategy", level=3)
     doc.add_paragraph(
         f"FX risk: {fx_risk.get('level', 'n/a')} (score {fx_risk.get('score', 0):.1f}/10); "
-        f"NPV swing across �5% FX scenarios: {fx_risk.get('swing_pct', 0):.1f}%."
+        f"NPV swing across ±5% FX scenarios: {fx_risk.get('swing_pct', 0):.1f}%."
     )
     if strategy:
         doc.add_paragraph(f"Recommended strategy: {strategy.get('strategy', '').replace('_', ' ')}")
