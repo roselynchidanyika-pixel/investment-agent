@@ -139,3 +139,62 @@ def build_email_body(
     lines.append("")
 
     return "\n".join(lines)
+
+
+def build_comparison_email_body(result, custom_message: str = "") -> str:
+    """Plain-text summary body for a two/three-project comparison email."""
+    lines = []
+    lines.append("=" * 66)
+    lines.append(f"CAPITAL PROJECT COMPARISON - {result.get('mode', 'Project Comparison')}")
+    lines.append("=" * 66)
+    lines.append("")
+
+    rec = result.get("recommendation", {})
+    if rec.get("winner"):
+        lines.append(f"RECOMMENDED: Project {rec['winner']} ({rec.get('winner_name', '')})")
+        lines.append(f"Composite score: {rec.get('score', 0):.3f}")
+        lines.append("")
+        lines.append("WHY:")
+        lines.append(rec.get("why", ""))
+        lines.append("")
+        lines.append("ACTION:")
+        lines.append(rec.get("action", ""))
+    else:
+        lines.append(rec.get("what", "No valid projects to compare."))
+
+    lines.append("")
+    lines.append("-" * 66)
+    lines.append("HEADLINE COMPARISON MATRIX")
+    lines.append("-" * 66)
+    df = result.get("comparison_df")
+    if df is not None and not df.empty:
+        for _, r in df.iterrows():
+            payback = f"{r['Payback']:.1f} yrs" if r["Payback"] == r["Payback"] else "N/A"
+            lines.append(
+                f"Project {r['Project']} - {r['Name']} ({r['Currency']})"
+            )
+            lines.append(
+                f"  Decision: {r['Decision']} | Risk: {r['Risk Level']} | FX Risk: {r['FX Risk']} "
+                f"| NPV USD: {r['NPV USD']:,.0f} | IRR: {r['IRR']:.1%} | MIRR: {r['MIRR']:.1%} "
+                f"| PI: {r['PI']:.2f} | Payback: {payback}"
+            )
+    else:
+        lines.append("No valid projects to display.")
+
+    lines.append("")
+    lines.append("Each project was evaluated with the same engine used for single-project")
+    lines.append("analysis (capital budgeting, DCF, returns, risk, scenario, sensitivity, FX")
+    lines.append("risk and final decision). USD-equivalents use the boarding exchange-rate set.")
+    lines.append("No currency (USD, ZAR or ZiG) is treated as automatically superior.")
+
+    if custom_message:
+        lines.append("")
+        lines.append(custom_message.strip())
+    lines.append("")
+    lines.append(
+        "This email was generated automatically by the "
+        "Integrated Investment Decision Agent for Capital Projects."
+    )
+    lines.append("")
+
+    return "\n".join(lines)

@@ -20,9 +20,13 @@ from data_validation import (
 from calculations import calculate_all_metrics, calculate_sensitivity, calculate_full_sensitivity
 from risk_analysis import assess_risks, get_risk_summary
 from scenario_analysis import run_scenario_analysis, explain_scenario
-from report_generator import generate_management_report
-from email_service import send_report_email, build_email_body
+from report_generator import generate_management_report, generate_comparison_report
+from email_service import send_report_email, build_email_body, build_comparison_email_body
+from decision_engine import get_final_decision
 from project_templates import get_project_type_list, get_template_inputs
+from project_comparison import (
+    build_comparison, load_sample_projects, template_name_for,
+)
 import fx_analysis
 from fx_analysis import (
     get_fx_market, run_fx_scenario_analysis, assess_currency_exposure,
@@ -172,132 +176,10 @@ def convert_currency(amount, from_currency, to_currency, rates):
     return usd_amount * rates.get(to_currency, 1)
 
 
-def get_final_decision(metrics, risk_data, scenario_data):
-    accept_score = 0
-    reject_score = 0
-    reasons_for = []
-    reasons_against = []
-
-    if metrics["npv_status"]["decision"] == "ACCEPT":
-        accept_score += 3
-        reasons_for.append("NPV is positive, indicating the project creates value above the required return.")
-    else:
-        reject_score += 3
-        reasons_against.append("NPV is negative, indicating value destruction.")
-
-    if metrics["irr_status"]["decision"] == "ACCEPT":
-        accept_score += 2
-        reasons_for.append(f"IRR ({metrics['irr']:.1%}) exceeds WACC ({metrics['wacc']:.1%}).")
-    else:
-        reject_score += 2
-        reasons_against.append(f"IRR ({metrics['irr']:.1%}) is below WACC ({metrics['wacc']:.1%}).")
-
-    if metrics["mirr_status"]["decision"] == "ACCEPT":
-        accept_score += 2
-        reasons_for.append(f"MIRR ({metrics['mirr']:.1%}) exceeds the required return.")
-    else:
-        reject_score += 2
-        reasons_against.append(f"MIRR ({metrics['mirr']:.1%}) is below the required return.")
-
-    if metrics["pi_status"]["decision"] == "ACCEPT":
-        accept_score += 1
-        reasons_for.append(f"Profitability Index ({metrics['pi']:.2f}) is above 1.0.")
-    else:
-        reject_score += 1
-        reasons_against.append(f"Profitability Index ({metrics['pi']:.2f}) is below 1.0.")
-
-    if metrics["payback_status"]["decision"] == "ACCEPT":
-        accept_score += 1
-        reasons_for.append("Payback period is within the project life.")
-    else:
-        reject_score += 1
-        reasons_against.append("Payback period exceeds the project life.")
-
-    if metrics["roi_status"]["decision"] == "ACCEPT":
-        accept_score += 1
-        reasons_for.append("ROI is positive.")
-    else:
-        reject_score += 1
-        reasons_against.append("ROI is negative.")
-
-    risk_level = risk_data.get("overall_level", "MEDIUM")
-    if risk_level in ("LOW",):
-        accept_score += 1
-        reasons_for.append(f"Risk level is {risk_level}.")
-    elif risk_level in ("HIGH", "VERY HIGH"):
-        reject_score += 1
-        reasons_against.append(f"Risk level is {risk_level}.")
-
-    worst_case = scenario_data.get("worst_case", {})
-    if worst_case.get("npv_status", {}).get("decision") == "REJECT":
-        reject_score += 1
-        reasons_against.append("Worst-case scenario produces negative NPV.")
-    else:
-        accept_score += 1
-        reasons_for.append("Even the worst-case scenario remains viable.")
-
-    total = accept_score + reject_score
-    accept_ratio = accept_score / total if total > 0 else 0.5
-
-    if accept_ratio >= 0.65:
-        decision = "ACCEPT"
-    elif accept_ratio <= 0.35:
-        decision = "REJECT"
-    else:
-        decision = "REVIEW"
-
-    if decision == "ACCEPT":
-        recommendation = (
-            "The project demonstrates strong financial fundamentals across multiple metrics. "
-            "Management should proceed with the investment, subject to ongoing monitoring of "
-            "key assumptions and regular performance reviews against projections."
-        )
-    elif decision == "REJECT":
-        recommendation = (
-            "Do not proceed under the current assumptions. Management should reconsider project costs, "
-            "expected revenues, financing structure, or required return before reassessment. "
-            "Alternative projects with better risk-adjusted returns should be evaluated."
-        )
-    else:
-        recommendation = (
-            "The project presents mixed signals. Management should conduct additional due diligence, "
-            "gather more market data, and consider a phased investment approach. "
-            "Key assumptions should be stress-tested further before a final commitment."
-        )
-
-    all_reasons = []
-    for r in reasons_for:
-        all_reasons.append(f"[+] {r}")
-    for r in reasons_against:
-        all_reasons.append(f"[-] {r}")
-
-    if decision == "ACCEPT":
-        main_reason = (
-            "The project clears most financial thresholds: NPV is positive, returns compare "
-            "favourably with the cost of capital, and risk is assessed as LOW."
-        )
-    elif decision == "REJECT":
-        main_reason = (
-            "The project fails most financial thresholds: NPV is negative, returns are below "
-            "the cost of capital, and the risk profile is unfavourable."
-        )
-    else:
-        main_reason = (
-            "The project presents mixed financial signals across the primary metrics, "
-            "warranting further review before commitment."
-        )
-
-    return {
-        "decision": decision,
-        "accept_score": accept_score,
-        "reject_score": reject_score,
-        "reasons_for": reasons_for,
-        "reasons_against": reasons_against,
-        "supporting_points": all_reasons,
-        "reason": "; ".join(reasons_for[:2] + reasons_against[:2]) if (reasons_for or reasons_against) else "Insufficient data.",
-        "main_reason": main_reason,
-        "recommendation": recommendation,
-    }
+def get_final_decision(metrics, risk_data, scenario_data):  # noqa: F811
+    """Backward-compatible re-export; implementation lives in decision_engine."""
+    from decision_engine import get_final_decision as _impl
+    return _impl(metrics, risk_data, scenario_data)
 
 
 def create_cash_flow_chart(metrics):
@@ -446,6 +328,50 @@ def display_metric_with_explanation(name, value, status, currency="USD"):
         st.info(status.get("reason", "No explanation available."))
 
 
+def _manual_fields(parent, key_prefix, template_inputs):
+    """Render one project's full numeric/manual inputs into `parent`.
+
+    Used by the single-project sidebar and the comparison-mode expanders. Widget
+    keys are derived from `key_prefix` so each project (and each template) keeps
+    its own independent session state.
+    """
+    data = get_default_inputs()
+    data["project_name"] = parent.text_input("Project Name", value=template_inputs.get("project_name", "New Investment Project"), key=f"{key_prefix}_name")
+    data["project_description"] = parent.text_area("Project Description", value=template_inputs.get("project_description", "Investment project evaluation"), height=68, key=f"{key_prefix}_desc")
+    data["currency"] = parent.selectbox("Currency", ["USD", "ZIG", "ZAR", "GBP", "EUR"], index=["USD", "ZIG", "ZAR", "GBP", "EUR"].index(template_inputs.get("currency", "USD")), key=f"{key_prefix}_ccy")
+
+    parent.subheader("Financial Parameters")
+    data["initial_investment"] = parent.number_input("Initial Investment", min_value=0.0, value=float(template_inputs.get("initial_investment", 1000000.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_inv")
+    data["project_life"] = parent.number_input("Project Life (years)", min_value=1, max_value=100, value=int(template_inputs.get("project_life", 10)), step=1, key=f"{key_prefix}_life")
+    data["working_capital"] = parent.number_input("Working Capital", min_value=0.0, value=float(template_inputs.get("working_capital", 100000.0)), step=5000.0, format="%.0f", key=f"{key_prefix}_wc")
+    data["terminal_value"] = parent.number_input("Terminal Value", min_value=0.0, value=float(template_inputs.get("terminal_value", 0.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_tv")
+
+    parent.subheader("Revenue & Costs (Annual)")
+    data["annual_revenue"] = parent.number_input("Annual Revenue", min_value=0.0, value=float(template_inputs.get("annual_revenue", 500000.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_rev")
+    data["operating_costs"] = parent.number_input("Operating Costs", min_value=0.0, value=float(template_inputs.get("operating_costs", 200000.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_cost")
+
+    parent.subheader("Rates & Assumptions")
+    data["tax_rate"] = parent.number_input("Tax Rate (%)", min_value=0.0, max_value=80.0, value=float(template_inputs.get("tax_rate", 0.25)) * 100, step=1.0, key=f"{key_prefix}_tax") / 100
+    data["wacc"] = parent.number_input("WACC / Discount Rate (%)", min_value=0.1, max_value=50.0, value=float(template_inputs.get("wacc", 0.10)) * 100, step=0.5, key=f"{key_prefix}_wacc") / 100
+    data["financing_rate"] = parent.number_input("Financing Rate (%)", min_value=0.1, max_value=50.0, value=float(template_inputs.get("financing_rate", 0.08)) * 100, step=0.5, key=f"{key_prefix}_fin") / 100
+    data["reinvestment_rate"] = parent.number_input("Reinvestment Rate (%)", min_value=0.0, max_value=30.0, value=float(template_inputs.get("reinvestment_rate", 0.06)) * 100, step=0.5, key=f"{key_prefix}_reinv") / 100
+    data["revenue_growth"] = parent.number_input("Revenue Growth (%/yr)", min_value=0.0, max_value=50.0, value=float(template_inputs.get("revenue_growth", 0.03)) * 100, step=0.5, key=f"{key_prefix}_revg") / 100
+    data["cost_growth"] = parent.number_input("Cost Growth (%/yr)", min_value=0.0, max_value=50.0, value=float(template_inputs.get("cost_growth", 0.03)) * 100, step=0.5, key=f"{key_prefix}_costg") / 100
+    data["terminal_growth"] = parent.number_input("Terminal Growth (%/yr)", min_value=0.0, max_value=30.0, value=float(template_inputs.get("terminal_growth", 0.0)) * 100, step=0.5, key=f"{key_prefix}_tg") / 100
+    data["depreciation_rate"] = parent.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, value=float(template_inputs.get("depreciation_rate", 0.10)) * 100, step=1.0, key=f"{key_prefix}_dep") / 100
+
+    parent.subheader("FX Exposure & Liquidity")
+    parent.caption("Share of revenue / costs denominated in ZiG and ZAR relative to the project currency.")
+    data["zig_revenue_share"] = parent.slider("Revenue in ZiG (%)", 0, 100, int(float(template_inputs.get("zig_revenue_share", 0.0)) * 100), 5, key=f"{key_prefix}_zrev") / 100
+    data["zar_revenue_share"] = parent.slider("Revenue in ZAR (%)", 0, 100, int(float(template_inputs.get("zar_revenue_share", 0.0)) * 100), 5, key=f"{key_prefix}_arrev") / 100
+    data["zig_cost_share"] = parent.slider("Operating Costs in ZiG (%)", 0, 100, int(float(template_inputs.get("zig_cost_share", 0.0)) * 100), 5, key=f"{key_prefix}_zcost") / 100
+    data["zar_cost_share"] = parent.slider("Operating Costs in ZAR (%)", 0, 100, int(float(template_inputs.get("zar_cost_share", 0.0)) * 100), 5, key=f"{key_prefix}_arcost") / 100
+    data["investment_fx_share"] = parent.slider("Investment FX-Exposed (%)", 0, 100, int(float(template_inputs.get("investment_fx_share", 0.0)) * 100), 5, key=f"{key_prefix}_invfx") / 100
+    data["liquidity_buffer_months"] = parent.number_input("Liquidity Buffer (months)", min_value=0, max_value=60, value=int(float(template_inputs.get("liquidity_buffer_months", 6.0))), step=1, key=f"{key_prefix}_liq")
+
+    return data
+
+
 def sidebar_inputs():
     st.sidebar.header("Investment Proposal Inputs")
     st.sidebar.markdown("---")
@@ -509,39 +435,7 @@ def sidebar_inputs():
         else:
             st.sidebar.caption(pt_desc.get(template_id, ""))
 
-        key_prefix = f"inp_{template_id}"
-        data["project_name"] = st.sidebar.text_input("Project Name", value=template_inputs.get("project_name", "New Investment Project"), key=f"{key_prefix}_name")
-        data["project_description"] = st.sidebar.text_area("Project Description", value=template_inputs.get("project_description", "Investment project evaluation"), height=68, key=f"{key_prefix}_desc")
-        data["currency"] = st.sidebar.selectbox("Currency", ["USD", "ZIG", "ZAR", "GBP", "EUR"], index=["USD", "ZIG", "ZAR", "GBP", "EUR"].index(template_inputs.get("currency", "USD")), key=f"{key_prefix}_ccy")
-
-        st.sidebar.subheader("Financial Parameters")
-        data["initial_investment"] = st.sidebar.number_input("Initial Investment", min_value=0.0, value=float(template_inputs.get("initial_investment", 1000000.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_inv")
-        data["project_life"] = st.sidebar.number_input("Project Life (years)", min_value=1, max_value=100, value=int(template_inputs.get("project_life", 10)), step=1, key=f"{key_prefix}_life")
-        data["working_capital"] = st.sidebar.number_input("Working Capital", min_value=0.0, value=float(template_inputs.get("working_capital", 100000.0)), step=5000.0, format="%.0f", key=f"{key_prefix}_wc")
-        data["terminal_value"] = st.sidebar.number_input("Terminal Value", min_value=0.0, value=float(template_inputs.get("terminal_value", 0.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_tv")
-
-        st.sidebar.subheader("Revenue & Costs (Annual)")
-        data["annual_revenue"] = st.sidebar.number_input("Annual Revenue", min_value=0.0, value=float(template_inputs.get("annual_revenue", 500000.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_rev")
-        data["operating_costs"] = st.sidebar.number_input("Operating Costs", min_value=0.0, value=float(template_inputs.get("operating_costs", 200000.0)), step=10000.0, format="%.0f", key=f"{key_prefix}_cost")
-
-        st.sidebar.subheader("Rates & Assumptions")
-        data["tax_rate"] = st.sidebar.number_input("Tax Rate (%)", min_value=0.0, max_value=80.0, value=float(template_inputs.get("tax_rate", 0.25)) * 100, step=1.0, key=f"{key_prefix}_tax") / 100
-        data["wacc"] = st.sidebar.number_input("WACC / Discount Rate (%)", min_value=0.1, max_value=50.0, value=float(template_inputs.get("wacc", 0.10)) * 100, step=0.5, key=f"{key_prefix}_wacc") / 100
-        data["financing_rate"] = st.sidebar.number_input("Financing Rate (%)", min_value=0.1, max_value=50.0, value=float(template_inputs.get("financing_rate", 0.08)) * 100, step=0.5, key=f"{key_prefix}_fin") / 100
-        data["reinvestment_rate"] = st.sidebar.number_input("Reinvestment Rate (%)", min_value=0.0, max_value=30.0, value=float(template_inputs.get("reinvestment_rate", 0.06)) * 100, step=0.5, key=f"{key_prefix}_reinv") / 100
-        data["revenue_growth"] = st.sidebar.number_input("Revenue Growth (%/yr)", min_value=0.0, max_value=50.0, value=float(template_inputs.get("revenue_growth", 0.03)) * 100, step=0.5, key=f"{key_prefix}_revg") / 100
-        data["cost_growth"] = st.sidebar.number_input("Cost Growth (%/yr)", min_value=0.0, max_value=50.0, value=float(template_inputs.get("cost_growth", 0.03)) * 100, step=0.5, key=f"{key_prefix}_costg") / 100
-        data["terminal_growth"] = st.sidebar.number_input("Terminal Growth (%/yr)", min_value=0.0, max_value=30.0, value=float(template_inputs.get("terminal_growth", 0.0)) * 100, step=0.5, key=f"{key_prefix}_tg") / 100
-        data["depreciation_rate"] = st.sidebar.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, value=float(template_inputs.get("depreciation_rate", 0.10)) * 100, step=1.0, key=f"{key_prefix}_dep") / 100
-
-        st.sidebar.subheader("FX Exposure & Liquidity")
-        st.sidebar.caption("Share of revenue / costs denominated in ZiG and ZAR relative to the project currency.")
-        data["zig_revenue_share"] = st.sidebar.slider("Revenue in ZiG (%)", 0, 100, int(float(template_inputs.get("zig_revenue_share", 0.0)) * 100), 5, key=f"{key_prefix}_zrev") / 100
-        data["zar_revenue_share"] = st.sidebar.slider("Revenue in ZAR (%)", 0, 100, int(float(template_inputs.get("zar_revenue_share", 0.0)) * 100), 5, key=f"{key_prefix}_arrev") / 100
-        data["zig_cost_share"] = st.sidebar.slider("Operating Costs in ZiG (%)", 0, 100, int(float(template_inputs.get("zig_cost_share", 0.0)) * 100), 5, key=f"{key_prefix}_zcost") / 100
-        data["zar_cost_share"] = st.sidebar.slider("Operating Costs in ZAR (%)", 0, 100, int(float(template_inputs.get("zar_cost_share", 0.0)) * 100), 5, key=f"{key_prefix}_arcost") / 100
-        data["investment_fx_share"] = st.sidebar.slider("Investment FX-Exposed (%)", 0, 100, int(float(template_inputs.get("investment_fx_share", 0.0)) * 100), 5, key=f"{key_prefix}_invfx") / 100
-        data["liquidity_buffer_months"] = st.sidebar.number_input("Liquidity Buffer (months)", min_value=0, max_value=60, value=int(float(template_inputs.get("liquidity_buffer_months", 6.0))), step=1, key=f"{key_prefix}_liq")
+        data = _manual_fields(st.sidebar, f"inp_{template_id}", template_inputs)
 
     for share_field in ("zig_revenue_share", "zar_revenue_share", "zig_cost_share", "zar_cost_share"):
         data.setdefault(share_field, 0.0)
@@ -549,6 +443,382 @@ def sidebar_inputs():
     data.setdefault("liquidity_buffer_months", 6.0)
 
     return data
+
+
+def _mode_selector():
+    """Sidebar radio choosing the evaluation mode (single vs 2/3 project comparison)."""
+    st.sidebar.radio(
+        "Evaluation Mode",
+        ["Single Project", "Two Projects", "Three Projects"],
+        key="eval_mode",
+    )
+    return st.session_state.get("eval_mode", "Single Project")
+
+
+def _comparison_project_widgets(parent, slot, label):
+    """Render one project's template picker + manual inputs inside a comparison slot."""
+    project_types = get_project_type_list()
+    pt_map = {p["name"]: p["id"] for p in project_types}
+    pt_desc = {p["id"]: p["description"] for p in project_types}
+
+    parent.markdown(f"##### {label}")
+    sel_name = parent.selectbox("Template", [p["name"] for p in project_types], key=f"cmp_{slot}_pt")
+    template_id = pt_map[sel_name]
+    template_inputs = get_template_inputs(template_id)
+    parent.caption(pt_desc.get(template_id, ""))
+    if parent.button("Load Template Assumptions", use_container_width=True, key=f"cmp_{slot}_load"):
+        for field, value in template_inputs.items():
+            st.session_state[f"cmp_inp_{slot}_{template_id}_{field}"] = value
+        st.rerun()
+
+    data = _manual_fields(parent, f"cmp_inp_{slot}_{template_id}", template_inputs)
+    data["project_label"] = label
+    data["_slot"] = slot
+    data["_template_id"] = template_id
+    return data
+
+
+def _prefill_comparison_widgets(samples):
+    """Write sample inputs into the comparison widget session keys so they are visible/editable."""
+    for i, sample in enumerate(samples):
+        slot = f"slot{i}"
+        tid = sample.get("_template_id", "generic")
+        st.session_state[f"cmp_{slot}_pt"] = template_name_for(tid)
+        for field, value in sample.items():
+            if field.startswith("_"):
+                continue
+            st.session_state[f"cmp_inp_{slot}_{tid}_{field}"] = value
+
+
+def _comparison_display_df(df):
+    rows = []
+    for _, r in df.iterrows():
+        payback = f"{r['Payback']:.1f}y" if r["Payback"] == r["Payback"] else "N/A"
+        rows.append([
+            r["Project"], r["Name"], r["Currency"], r["Decision"], r["Risk Level"],
+            f"{r['FX Risk']} ({r['FX Score']:.1f})" if r["FX Score"] == r["FX Score"] else "—",
+            f"${r['Investment USD']:,.0f}", f"${r['NPV USD']:,.0f}", f"${r['Base NPV USD']:,.0f}",
+            f"{r['IRR']:.1%}", f"{r['MIRR']:.1%}", f"{r['PI']:.2f}", f"{r['ROI']:.1%}",
+            payback, f"{r['WACC']:.1%}", r["Strategy"],
+        ])
+    return pd.DataFrame(rows, columns=[
+        "Project", "Name", "CCY", "Decision", "Risk", "FX Risk",
+        "Investment (USD)", "NPV (USD)", "Base NPV (USD)",
+        "IRR", "MIRR", "PI", "ROI", "Payback", "WACC", "Strategy",
+    ])
+
+
+def _highlight_winner_row(s, winner):
+    return ["background-color:#e3f6e3;font-weight:bold;" if s["Project"] == winner else "" for _ in s]
+
+
+def _decision_badge(decision):
+    if decision == "ACCEPT":
+        return f'<span class="decision-accept">ACCEPT</span>'
+    if decision == "REJECT":
+        return f'<span class="decision-reject">REJECT</span>'
+    return f'<span class="decision-review">REVIEW</span>'
+
+
+def render_comparison(result, mode):
+    rec = result.get("recommendation", {})
+    df = result.get("comparison_df")
+    invalid = result.get("invalid", [])
+
+    st.subheader(f"{mode} — Side-by-Side Evaluation")
+    st.caption(
+        "Each project is evaluated with the exact same engine used in single-project mode: "
+        "capital budgeting, DCF, returns, risk, scenario, sensitivity, FX risk and final decision. "
+        "USD-equivalents use the boarding exchange rates; per-project steps are shown in each "
+        "project's own currency."
+    )
+
+    if invalid:
+        for e in invalid:
+            with st.expander(f"Validation failed — {e.get('name', e.get('label'))}"):
+                for err in e.get("errors", []):
+                    st.error(err)
+
+    if rec.get("winner"):
+        st.markdown(
+            f'<div class="metric-box">'
+            f'<h3 style="color:#0a7d0a">RECOMMENDED: {rec["what"]}</h3>'
+            f'<p>Composite score: <b>{rec["score"]:.3f}</b></p></div>',
+            unsafe_allow_html=True,
+        )
+
+    if df is None or df.empty:
+        st.info(rec.get("what", "No valid projects to compare."))
+        return
+
+    tabs = st.tabs([
+        "Comparison Overview", "Risk & FX", "Scenario & Sensitivity",
+        "Final Recommendation", "Detailed Steps", "Comparison Report", "Email Report",
+    ])
+
+    with tabs[0]:
+        st.markdown("#### Headline Comparison Matrix")
+        display = _comparison_display_df(df)
+        styler = display.style.apply(_highlight_winner_row, winner=str(rec.get("winner", "")), axis=1)
+        st.dataframe(styler, use_container_width=True, hide_index=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = go.Figure(go.Bar(
+                x=df["Project"], y=df["NPV USD"],
+                marker_color=["#0a7d0a" if p == rec.get("winner") else "#0066cc" for p in df["Project"]],
+                text=[f"${v:,.0f}" for v in df["NPV USD"]], textposition="outside",
+            ))
+            fig.update_layout(title="NPV (USD equivalent)", template="plotly_white", height=360, yaxis_title="$")
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            ranked = result.get("ranking_df")
+            if not ranked.empty:
+                fig2 = go.Figure(go.Bar(
+                    x=ranked["Project"], y=ranked["Composite Score"],
+                    marker_color=["#0a7d0a" if p == rec.get("winner") else "#c49b00" for p in ranked["Project"]],
+                    text=[f"{v:.3f}" for v in ranked["Composite Score"]], textposition="outside",
+                ))
+                fig2.update_layout(title="Composite Score", template="plotly_white", height=360)
+                st.plotly_chart(fig2, use_container_width=True)
+
+    with tabs[1]:
+        st.markdown("#### Risk, FX & Currency Strategy")
+        risk_rows = []
+        for _, r in df.iterrows():
+            risk_rows.append([
+                r["Project"], r["Name"], r["Risk Level"], r["FX Risk"],
+                f"{r['FX Score']:.1f}/{10}" if r["FX Score"] == r["FX Score"] else "—",
+                f"{r['NPV Swing %']:.1f}%", r["Strategy"],
+            ])
+        st.dataframe(pd.DataFrame(risk_rows, columns=[
+            "Project", "Name", "Risk Level", "FX Risk Level", "FX Score", "NPV Swing (±5% FX)", "Recommended Strategy",
+        ]), use_container_width=True, hide_index=True)
+        st.caption("FX risk and strategy come from the same engine as the single-project FX tab.")
+
+    with tabs[2]:
+        st.markdown("#### Scenario Comparison (Base / Best / Worst NPV)")
+        scen_rows = []
+        for _, r in df.iterrows():
+            scen_rows.append([
+                r["Project"], r["Name"], r["Currency"],
+                f"{r['Best NPV']:,.0f}", f"{r['Base NPV']:,.0f}", f"{r['Worst NPV']:,.0f}",
+            ])
+        st.dataframe(pd.DataFrame(scen_rows, columns=[
+            "Project", "Name", "CCY", "Best Case NPV", "Base Case NPV", "Worst Case NPV",
+        ]), use_container_width=True, hide_index=True)
+
+        fig3 = go.Figure()
+        for _, r in df.iterrows():
+            fig3.add_trace(go.Bar(
+                x=["Best", "Base", "Worst"],
+                y=[r["Best NPV"], r["Base NPV"], r["Worst NPV"]],
+                name=r["Project"],
+            ))
+        fig3.update_layout(
+            title="Scenario NPV by Project", template="plotly_white",
+            height=380, barmode="group", yaxis_title="NPV",
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+        st.markdown("#### Most Influential Sensitivity Drivers")
+        sens_rows = []
+        for e in result.get("evaluated", []):
+            if e.get("status") != "ok":
+                continue
+            top = (e.get("sensitivity_data", {}).get("ranking") or [])[:3]
+            for s in top:
+                sens_rows.append([
+                    e["label"], e["name"], s.get("label", ""), f"{s.get('npv_range', 0):,.0f}",
+                ])
+        if sens_rows:
+            st.dataframe(pd.DataFrame(sens_rows, columns=[
+                "Project", "Name", "Driver", "NPV Range",
+            ]), use_container_width=True, hide_index=True)
+
+    with tabs[3]:
+        st.markdown("#### Final Recommendation")
+        if rec.get("winner"):
+            st.markdown(f'<div class="metric-box"><h3 style="color:#0a7d0a">Project {rec["winner"]} — {rec["winner_name"]}</h3></div>', unsafe_allow_html=True)
+            st.markdown(rec.get("why", ""))
+            st.markdown("**Evidence by metric:**")
+            for line in rec.get("evidence", []):
+                st.markdown(f"- {line}")
+            st.markdown(f"**Risk:** {rec.get('risks', '—')}")
+            st.markdown(f"**Action:** {rec.get('action', '')}")
+            st.markdown("**Per-project verdicts:**")
+            for _, r in df.iterrows():
+                st.markdown(
+                    f"- Project {r['Project']} ({r['Name']}): {_decision_badge(r['Decision'])} "
+                    f"· risk {r['Risk Level']} · FX {r['FX Risk']}",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info(rec.get("what", "No valid projects to compare."))
+
+    with tabs[4]:
+        okay = [e for e in result.get("evaluated", []) if e.get("status") == "ok"]
+        if not okay:
+            st.info("No valid projects to inspect.")
+        else:
+            pick = st.selectbox(
+                "Inspect the full single-project analysis steps for:",
+                [f"{e['label']} — {e['name']}" for e in okay],
+            )
+            idx = [f"{e['label']} — {e['name']}" for e in okay].index(pick)
+            _tab_comparison_detail(okay[idx], df)
+
+    with tabs[5]:
+        st.markdown("#### Comparison Report (.docx)")
+        with st.spinner("Generating comparison report..."):
+            report_path = generate_comparison_report(result)
+        with open(report_path, "rb") as f:
+            st.download_button(
+                "Download Comparison Report (.docx)",
+                f,
+                file_name=os.path.basename(report_path),
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        st.caption("The report includes the headline matrix, ranking, scenario comparison, per-project "
+                   "step-by-step sections and the final recommendation.")
+
+    with tabs[6]:
+        _tab_comparison_email(result)
+
+
+def _tab_comparison_detail(eval_bundle, df):
+    name = eval_bundle["name"]
+    label = eval_bundle["label"]
+    ccy = eval_bundle.get("currency", "USD")
+    inputs = eval_bundle["inputs"]
+    metrics = eval_bundle["metrics"]
+
+    st.markdown(f"#### Project {label} — {name} ({ccy})")
+    cols = st.columns(5)
+    with cols[0]:
+        st.metric("NPV", format_currency(metrics["npv"], ccy))
+    with cols[1]:
+        st.metric("IRR", format_pct(metrics["irr"]))
+    with cols[2]:
+        st.metric("MIRR", format_pct(metrics["mirr"]))
+    with cols[3]:
+        st.metric("PI", f"{metrics['pi']:.2f}")
+    with cols[4]:
+        pb = metrics["payback"]
+        st.metric("Payback", f"{pb:.1f} yrs" if pb != float("inf") else "N/A")
+
+    fd = eval_bundle["final_decision"]
+    st.markdown(
+        f'<div class="metric-box"><h3 style="color:#0a7d0a">FINAL DECISION: '
+        f'{_decision_badge(fd["decision"])}</h3><p>{fd.get("main_reason", "")}</p></div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("Supporting points"):
+        for pt in fd.get("supporting_points", []):
+            if pt.startswith("[+]"):
+                st.markdown(f":green[{pt}]")
+            else:
+                st.markdown(f":red[{pt}]")
+
+    st.markdown("**Capital Budgeting — Cash Flows**")
+    cf = metrics["cash_flow_table"].copy()
+    fmt_cols = [c for c in cf.columns if c not in ("Year", "Initial Investment", "Working Capital", "Terminal Value")]
+    for c in fmt_cols:
+        if c in cf.columns and c != "Year":
+            cf[c] = cf[c].apply(lambda x: format_currency(x, ccy) if isinstance(x, (int, float)) else x)
+    st.dataframe(cf, use_container_width=True, hide_index=True)
+
+    st.markdown("**DCF Summary**")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.metric("DCF Value", format_currency(metrics["dcf_value"], ccy))
+    with d2:
+        st.metric("PV of Inflows", format_currency(metrics["total_pv_inflows"], ccy))
+    with d3:
+        st.metric("Net Value Created", format_currency(metrics["dcf_value"] - metrics["initial_investment"], ccy))
+
+    scen = eval_bundle["scenario_data"]
+    st.markdown("**Scenario Analysis**")
+    st.dataframe(pd.DataFrame([
+        ["Best Case", format_currency(scen["best_case"]["npv"], ccy), scen["best_case"]["npv_status"]["decision"]],
+        ["Base Case", format_currency(scen["base_case"]["npv"], ccy), scen["base_case"]["npv_status"]["decision"]],
+        ["Worst Case", format_currency(scen["worst_case"]["npv"], ccy), scen["worst_case"]["npv_status"]["decision"]],
+    ], columns=["Scenario", "NPV", "Decision"]), use_container_width=True, hide_index=True)
+
+    sens = eval_bundle["sensitivity_data"]
+    st.markdown("**Sensitivity — Most Influential Drivers**")
+    st.dataframe(pd.DataFrame([
+        [s.get("label", ""), f"{s.get('npv_range', 0):,.0f}"] for s in (sens.get("ranking") or [])[:3]
+    ], columns=["Driver", "NPV Range"]), use_container_width=True, hide_index=True)
+
+    st.markdown("**Risk & FX**")
+    fxr = eval_bundle["fx_risk"]
+    strat = eval_bundle["currency_strategy"]
+    st.markdown(
+        f"- **Overall risk:** {eval_bundle['risk_data']['overall_level']}  \n"
+        f"- **FX risk:** {fxr['level'] if fxr else '—'} (score {fxr['score'] if fxr else '—'}/10, "
+        f"NPV swing {fxr['swing_pct'] if fxr else 0:.1f}%)  \n"
+        f"- **Strategy:** {strat.get('recommendation_text', '—') if strat else '—'}"
+    )
+
+
+def _tab_comparison_email(result):
+    st.markdown("#### Email the Comparison Results")
+    rec = result.get("recommendation", {})
+    winner_txt = f" — Project {rec['winner']} Recommended" if rec.get("winner") else ""
+
+    recipient = st.text_input("Recipient Email", key="cmp_email_to")
+    subject = st.text_input("Subject", value=f"{result.get('mode', 'Project Comparison')} Results{winner_txt}", key="cmp_email_subject")
+    custom = st.text_area("Custom Message (optional)", height=90, key="cmp_email_msg")
+
+    if st.button("Send Comparison Email", type="primary", key="cmp_email_send"):
+        body = build_comparison_email_body(result, custom_message=custom)
+        report_path = generate_comparison_report(result)
+        outcome = send_report_email(recipient, subject, body, attachment_path=report_path)
+        if outcome.get("success"):
+            st.success(outcome["message"])
+        else:
+            st.error(outcome["message"])
+
+
+def comparison_main(mode, fx_market, fx_rates):
+    n = 2 if mode == "Two Projects" else 3
+    labels = ["Project A", "Project B", "Project C"][:n]
+    slot_keys = [f"slot{i}" for i in range(n)]
+
+    if st.session_state.pop("cmp_load_sample", False):
+        samples = load_sample_projects(n)
+        _prefill_comparison_widgets(samples)
+        with st.spinner(f"Evaluating {n} projects..."):
+            st.session_state["cmp_result"] = build_comparison(samples, fx_market, fx_rates, mode)
+        st.session_state["cmp_analyzed"] = True
+        st.rerun()
+
+    projects = []
+    for i, label in enumerate(labels):
+        with st.sidebar.expander(f"{label} Inputs", expanded=False):
+            projects.append(_comparison_project_widgets(st.sidebar, slot_keys[i], label))
+
+    st.sidebar.markdown("---")
+    analyze_clicked = st.sidebar.button("Analyze Comparison", type="primary", use_container_width=True)
+    load_sample_clicked = st.sidebar.button(f"Load Sample {mode}", use_container_width=True)
+
+    if analyze_clicked:
+        with st.spinner(f"Evaluating {n} projects..."):
+            st.session_state["cmp_result"] = build_comparison(projects, fx_market, fx_rates, mode)
+        st.session_state["cmp_analyzed"] = True
+
+    if load_sample_clicked:
+        st.session_state["cmp_load_sample"] = True
+        st.rerun()
+
+    if "cmp_result" in st.session_state:
+        render_comparison(st.session_state["cmp_result"], mode)
+    else:
+        st.info(
+            f"Enter the {n} projects in the sidebar and click **Analyze Comparison** — or click "
+            f"**Load Sample {mode}** to run the bundled sample data set."
+        )
 
 
 def tab_executive_summary(metrics, risk_data, scenario_data, final_decision, inputs, fx_rates,
@@ -1521,6 +1791,11 @@ def main():
 
     fx_market = load_fx_market()
     fx_rates = build_rates_dict(fx_market)
+
+    mode = _mode_selector()
+    if mode != "Single Project":
+        comparison_main(mode, fx_market, fx_rates)
+        return
 
     inputs = sidebar_inputs()
 

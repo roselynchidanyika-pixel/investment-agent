@@ -367,6 +367,66 @@ def test_fx_modules():
     return True
 
 
+def test_project_comparison():
+    print("\n" + "=" * 70)
+    print("TEST 7: Two/Three-Project Comparison Engine")
+    print("=" * 70)
+
+    from project_comparison import load_sample_projects, build_comparison, template_name_for
+
+    fx_market = {
+        "rates": {"USD_ZIG": 13.5, "ZIG_USD": 0.074, "USD_ZAR": 18.5, "ZAR_USD": 0.054},
+        "pairs": [],
+        "fx_risk_level": "LOW",
+        "fx_risk_score": 2.0,
+        "current": {"USD": 1.0, "ZIG": 13.5, "ZWG": 26.5591, "ZAR": 18.5},
+    }
+    fx_rates = {
+        "USD": 1.0, "ZIG": 13.5, "ZWG": 26.5591, "ZAR": 18.5,
+        "USD_ZIG": 13.5, "ZIG_USD": 0.074, "USD_ZAR": 18.5, "ZAR_USD": 0.054,
+    }
+
+    two = load_sample_projects(2)
+    assert len(two) == 2, "Test 7 failed: expected 2 sample projects"
+    print(f"  Loaded sample projects (2): {[p['project_name'] for p in two]}")
+
+    result2 = build_comparison(two, fx_market, fx_rates, mode="Two Projects")
+    assert len(result2["comparison_df"]) == 2, "Test 7 failed: comparison matrix row count (2)"
+    assert {"NPV USD", "IRR", "MIRR", "PI", "Payback"}.issubset(result2["comparison_df"].columns), \
+        "Test 7 failed: missing comparison metrics"
+    assert len(result2["ranking_df"]) == 2 and "Rank" in result2["ranking_df"].columns, \
+        "Test 7 failed: ranking not produced for 2 projects"
+    rec2 = result2["recommendation"]
+    assert rec2["winner"] in ("A", "B"), f"Test 7 failed: unknown winner {rec2['winner']}"
+    assert rec2["winner_name"], "Test 7 failed: missing winner name"
+    print(f"  2-project winner: {rec2['winner']} ({rec2['winner_name']}, composite {rec2['score']})")
+    for e in result2["evaluated"]:
+        assert e["status"] == "ok", f"Test 7 failed: project evaluation failed: {e.get('errors')}"
+        assert e["final_decision"]["decision"] in ("ACCEPT", "REJECT", "REVIEW")
+        assert "fx_risk" in e and "currency_strategy" in e
+
+    three = load_sample_projects(3)
+    assert len(three) == 3, "Test 7 failed: expected 3 sample projects"
+    result3 = build_comparison(three, fx_market, fx_rates, mode="Three Projects")
+    assert len(result3["comparison_df"]) == 3, "Test 7 failed: comparison matrix row count (3)"
+    assert len(result3["ranking_df"]) == 3 and {1, 2, 3}.issubset(result3["ranking_df"]["Rank"]), \
+        "Test 7 failed: ranking not produced for 3 projects"
+    rec3 = result3["recommendation"]
+    assert rec3["winner"] in ("A", "B", "C"), f"Test 7 failed: unknown winner {rec3['winner']}"
+    print(f"  3-project winner: {rec3['winner']} ({rec3['winner_name']}, composite {rec3['score']})")
+
+    # Recommendations must never claim a currency is superior.
+    for txt in (rec2["why"] + " " + rec2["action"], rec3["why"] + " " + rec3["action"]):
+        for word in ("USD is better", "ZiG is better", "ZAR is better", "superior currency"):
+            assert word.lower() not in txt.lower(), f"Test 7 failed: currency-superiority wording: {word}"
+
+    assert "Manufacturing" in template_name_for("manufacturing_capacity_upgrade")
+    print("  Currency-neutral recommendation language: PASS")
+
+    print("\nRESULT: PASS")
+    return True
+
+
 def run_all_tests():
     print("\n" + "#" * 70)
     print("#  INTEGRATED INVESTMENT DECISION AGENT FOR CAPITAL PROJECTS - TEST SUITE")
@@ -380,6 +440,7 @@ def run_all_tests():
         ("Test 4: High-Risk Project", test_high_risk_project),
         ("Test 5: Project Type Templates", test_project_templates),
         ("Test 6: FX Market & Strategy", test_fx_modules),
+        ("Test 7: Project Comparison", test_project_comparison),
     ]
 
     for name, test_func in tests:

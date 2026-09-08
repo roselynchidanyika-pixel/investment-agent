@@ -722,3 +722,244 @@ def _add_limitations(doc):
     ]
     for lim in limitations:
         doc.add_paragraph(lim, style="List Bullet")
+
+def generate_comparison_report(
+    result: Dict[str, Any],
+) -> str:
+    """Generate a .docx comparison report for a two- or three-project comparison.
+
+    Additive; does not touch generate_management_report.
+    """
+    from data_validation import format_currency, format_pct
+
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Arial"
+    style.font.size = Pt(10)
+
+    _add_comparison_title(doc, result)
+    doc.add_page_break()
+
+    _add_comparison_executive_summary(doc, result)
+    _add_comparison_methodology(doc)
+    _add_comparison_matrix(doc, result)
+    _add_comparison_ranking(doc, result)
+    _add_comparison_scenarios(doc, result)
+    for bundle in result.get("evaluated", []):
+        if bundle.get("status") == "ok":
+            _add_comparison_project_section(doc, bundle)
+    _add_comparison_recommendation(doc, result)
+    _add_limitations(doc)
+
+    mode = result.get("mode", "Project Comparison").replace(" ", "_")
+    output_path = os.path.join(
+        tempfile.gettempdir(),
+        f"Project_Comparison_{mode}_{datetime.now().strftime('%Y%m%d')}.docx",
+    )
+    doc.save(output_path)
+    return output_path
+
+
+def _add_comparison_title(doc, result):
+    for _ in range(6):
+        doc.add_paragraph()
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("CAPITAL PROJECT\nCOMPARISON REPORT")
+    run.bold = True
+    run.font.size = Pt(28)
+    run.font.color.rgb = RGBColor(0, 51, 102)
+    doc.add_paragraph()
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = subtitle.add_run(result.get("mode", "Project Comparison"))
+    run.font.size = Pt(18)
+    run.font.color.rgb = RGBColor(0, 102, 153)
+    doc.add_paragraph()
+    date_para = doc.add_paragraph()
+    date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = date_para.add_run(f"Generated: {datetime.now().strftime('%B %d, %Y')}")
+    run.font.size = Pt(12)
+    run.font.color.rgb = RGBColor(100, 100, 100)
+    rec = result.get("recommendation", {})
+    if rec.get("winner"):
+        doc.add_paragraph()
+        winner_para = doc.add_paragraph()
+        winner_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = winner_para.add_run(f"RECOMMENDED: Project {rec['winner']} — {rec.get('winner_name', '')}")
+        run.bold = True
+        run.font.size = Pt(16)
+        run.font.color.rgb = RGBColor(0, 128, 0)
+
+
+def _add_comparison_executive_summary(doc, result):
+    _add_heading(doc, "1. Executive Summary")
+    rec = result.get("recommendation", {})
+    doc.add_paragraph(
+        f"This report compares {result.get('n', 0)} capital projects using the same analytical "
+        "pipeline as the single-project evaluation: capital budgeting, DCF, returns, risk, scenario, "
+        "sensitivity, FX risk and final decision."
+    )
+    if rec.get("winner"):
+        doc.add_paragraph(f"Recommended project: {rec.get('what', '')}")
+        doc.add_paragraph(rec.get("why", ""))
+        doc.add_paragraph(rec.get("action", ""))
+    else:
+        doc.add_paragraph(rec.get("what", "No valid projects to compare."))
+
+
+def _add_comparison_methodology(doc, result):
+    _add_heading(doc, "2. Methodology")
+    for p in [
+        "Each project is evaluated with the identical single-project engine: capital budgeting, "
+        "DCF valuation, returns analysis, scenario analysis, sensitivity analysis, risk assessment, "
+        "FX risk assessment and final ACCEPT/REVIEW/REJECT decision.",
+        "For projects in different currencies, monetary values are converted to USD-equivalents "
+        "using the live/boarding exchange-rate set at the time of the analysis. Within each project, "
+        "all step-by-step metrics are shown in the project's own currency.",
+        "Projects are ranked with a transparent, equal-weighted composite score across NPV, IRR, "
+        "MIRR, PI, ROI, payback, base-case NPV and risk level.",
+        "The winner is decided purely by the computed results. No currency (USD, ZAR or ZiG) is "
+        "treated as automatically superior.",
+        "If a project fails input validation, it is excluded from the matrix and its validation "
+        "errors are listed instead.",
+    ]:
+        doc.add_paragraph(p, style="List Bullet")
+
+
+def _add_comparison_matrix(doc, result):
+    _add_heading(doc, "3. Headline Comparison Matrix")
+    df = result.get("comparison_df")
+    if df is None or df.empty:
+        doc.add_paragraph("No valid projects to display.")
+        return
+    rows = []
+    for _, r in df.iterrows():
+        rows.append([
+            r["Project"], r["Name"], r["Currency"], r["Decision"], r["Risk Level"],
+            r["FX Risk"],
+            f"{r['Investment USD']:,.0f}",
+            f"{r['NPV USD']:,.0f}",
+            format_pct(r["IRR"]), format_pct(r["MIRR"]),
+            f"{r['PI']:.2f}", format_pct(r["ROI"]),
+            f"{r['Payback']:.1f} yrs" if r["Payback"] == r["Payback"] else "N/A",
+            format_pct(r["WACC"]),
+        ])
+    _add_styled_table(doc, [
+        "Project", "Name", "CCY", "Decision", "Risk", "FX Risk",
+        "Investment USD", "NPV USD", "IRR", "MIRR", "PI", "ROI", "Payback", "WACC",
+    ], rows)
+
+
+def _add_comparison_ranking(doc, result):
+    _add_heading(doc, "4. Ranking & Composite Scores")
+    df = result.get("ranking_df")
+    if df is None or df.empty:
+        doc.add_paragraph("No valid projects to rank.")
+        return
+    rows = [[int(r["Rank"]), r["Project"], r["Name"], f"{r['Composite Score']:.3f}"] for _, r in df.iterrows()]
+    _add_styled_table(doc, ["Rank", "Project", "Name", "Composite Score"], rows)
+
+
+def _add_comparison_scenarios(doc, result):
+    _add_heading(doc, "5. Scenario Comparison")
+    df = result.get("comparison_df")
+    if df is None or df.empty:
+        return
+    rows = []
+    for _, r in df.iterrows():
+        ccy = r["Currency"]
+        rows.append([
+            r["Project"], r["Name"],
+            format_currency(r["Best NPV"], ccy),
+            format_currency(r["Base NPV"], ccy),
+            format_currency(r["Worst NPV"], ccy),
+        ])
+    _add_styled_table(doc, ["Project", "Name", "Best Case NPV", "Base Case NPV", "Worst Case NPV"], rows)
+    doc.add_paragraph(
+        "Scenario JSON uses the standard adjustments: Best (+20% revenue, -10% costs, -2% WACC) "
+        "and Worst (-20% revenue, +10% costs, +2% WACC)."
+    )
+
+
+def _add_comparison_project_section(doc, bundle):
+    name = bundle.get("name", "Project")
+    label = bundle.get("label", "Project")
+    ccy = bundle.get("currency", "USD")
+    metrics = bundle.get("metrics", {})
+    risk_data = bundle.get("risk_data", {})
+    scenario_data = bundle.get("scenario_data", {})
+    sensitivity_data = bundle.get("sensitivity_data", {})
+    final_decision = bundle.get("final_decision", {})
+    fx_risk = bundle.get("fx_risk", {})
+    strategy = bundle.get("currency_strategy", {})
+
+    _add_heading(doc, f"6. Project {label} — {name}", level=2)
+
+    metric_rows = [
+        ["NPV", format_currency(metrics.get("npv", 0), ccy), metrics.get("npv_status", {}).get("decision", "N/A")],
+        ["DCF Value", format_currency(metrics.get("dcf_value", 0), ccy), ""],
+        ["IRR", format_pct(metrics.get("irr", 0)), metrics.get("irr_status", {}).get("decision", "N/A")],
+        ["MIRR", format_pct(metrics.get("mirr", 0)), metrics.get("mirr_status", {}).get("decision", "N/A")],
+        ["PI", f"{metrics.get('pi', 0):.2f}", metrics.get("pi_status", {}).get("decision", "N/A")],
+        ["ROI", format_pct(metrics.get("roi", 0)), metrics.get("roi_status", {}).get("decision", "N/A")],
+        ["Payback", f"{metrics.get('payback', float('inf')):.1f} years" if metrics.get("payback", float("inf")) != float("inf") else "N/A", metrics.get("payback_status", {}).get("decision", "N/A")],
+        ["Initial Investment", format_currency(metrics.get("initial_investment", 0), ccy), ""],
+        ["WACC", format_pct(metrics.get("wacc", 0)), ""],
+    ]
+    _add_styled_table(doc, ["Metric", "Value", "Decision"], metric_rows)
+
+    verdict = final_decision.get("decision", "N/A")
+    p = doc.add_paragraph()
+    run = p.add_run(f"Final Decision: {verdict}")
+    run.bold = True
+    if verdict == "ACCEPT":
+        run.font.color.rgb = RGBColor(0, 128, 0)
+    elif verdict == "REJECT":
+        run.font.color.rgb = RGBColor(200, 0, 0)
+    else:
+        run.font.color.rgb = RGBColor(200, 160, 0)
+    doc.add_paragraph(final_decision.get("main_reason", ""))
+
+    _add_heading(doc, "Risk Assessment", level=3)
+    doc.add_paragraph(f"Overall risk level: {risk_data.get('overall_level', 'N/A')}")
+    risks = sorted(risk_data.get("risks", []), key=lambda x: x.get("severity_score", 0), reverse=True)[:3]
+    for r in risks:
+        doc.add_paragraph(f"- {r.get('name', 'Risk')}: severity {r.get('severity_score', 0)}/10", style="List Bullet")
+
+    _add_heading(doc, "Scenarios", level=3)
+    scen_rows = [
+        ["Best Case", format_currency(scenario_data.get("best_case", {}).get("npv", 0), ccy)],
+        ["Base Case", format_currency(scenario_data.get("base_case", {}).get("npv", 0), ccy)],
+        ["Worst Case", format_currency(scenario_data.get("worst_case", {}).get("npv", 0), ccy)],
+    ]
+    _add_styled_table(doc, ["Scenario", "NPV"], scen_rows)
+
+    _add_heading(doc, "Sensitivity — Most Influential Drivers", level=3)
+    for s in (sensitivity_data.get("ranking") or [])[:3]:
+        label = s.get("label", s.get("variable", ""))
+        doc.add_paragraph(f"- {label}: NPV range {s.get('npv_range', 0):,.0f}", style="List Bullet")
+
+    _add_heading(doc, "FX Risk & Currency Strategy", level=3)
+    doc.add_paragraph(
+        f"FX risk: {fx_risk.get('level', 'n/a')} (score {fx_risk.get('score', 0):.1f}/10); "
+        f"NPV swing across ±5% FX scenarios: {fx_risk.get('swing_pct', 0):.1f}%."
+    )
+    if strategy:
+        doc.add_paragraph(f"Recommended strategy: {strategy.get('strategy', '').replace('_', ' ')}")
+        doc.add_paragraph(strategy.get("recommendation_text", ""))
+
+
+def _add_comparison_recommendation(doc, result):
+    _add_heading(doc, "7. Final Recommendation")
+    rec = result.get("recommendation", {})
+    if not rec.get("winner"):
+        doc.add_paragraph(rec.get("what", "No valid projects to compare."))
+        return
+    doc.add_paragraph(rec.get("what", ""))
+    doc.add_paragraph(rec.get("why", ""))
+    doc.add_paragraph("Evidence by metric:")
+    for line in rec.get("evidence", []):
+        doc.add_paragraph(f"- {line}", style="List Bullet")
+    doc.add_paragraph(rec.get("risks", ""))
+    doc.add_paragraph(rec.get("action", ""))

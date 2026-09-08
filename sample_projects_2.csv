@@ -1,0 +1,47 @@
+project,parameter,value
+A,project_name,Growth Facility Expansion
+A,project_description,Expansion of production capacity to satisfy growing regional demand
+A,initial_investment,1000000
+A,project_life,10
+A,annual_revenue,350000
+A,operating_costs,80000
+A,tax_rate,0.25
+A,working_capital,0
+A,terminal_value,0
+A,wacc,0.10
+A,financing_rate,0.08
+A,reinvestment_rate,0.06
+A,revenue_growth,0.00
+A,cost_growth,0.00
+A,terminal_growth,0.00
+A,depreciation_rate,0.10
+A,currency,USD
+A,zig_revenue_share,0.20
+A,zig_cost_share,0.30
+A,zar_revenue_share,0.20
+A,zar_cost_share,0.10
+A,investment_fx_share,0.00
+A,liquidity_buffer_months,6
+B,project_name,Manufacturing Capacity Upgrade
+B,project_description,Investment in machinery and equipment to increase production capacity and efficiency
+B,initial_investment,800000
+B,project_life,10
+B,annual_revenue,400000
+B,operating_costs,180000
+B,tax_rate,0.25
+B,working_capital,50000
+B,terminal_value,0
+B,wacc,0.12
+B,financing_rate,0.09
+B,reinvestment_rate,0.06
+B,revenue_growth,0.04
+B,cost_growth,0.03
+B,terminal_growth,0.00
+B,depreciation_rate,0.10
+B,currency,USD
+B,zig_revenue_share,0.30
+B,zig_cost_share,0.40
+B,zar_revenue_share,0.10
+B,zar_cost_share,0.10
+B,investment_fx_share,0.70
+B,liquidity_buffer_months,4
